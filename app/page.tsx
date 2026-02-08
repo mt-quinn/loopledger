@@ -67,10 +67,7 @@ type ParsedOperation = {
 const STORAGE_KEY = "whichstitch-state-v2";
 const DEFAULT_STARTING_STITCHES = 90;
 
-const DEFAULT_PATTERN = `Rnd1: *k3, k1yok1, k1, k1yok1, k6, k1yok1, k1, k1yok1, k3*, rep from * to * 5 times.
-Rnd2: *k3, sl7, k6, sl7, k3*, rep from * to * 5 times.
-Rnd3: *k1, place 2 sts on CN and hold to the back, k3tog tbl, k2 from CN, k1, place 3 sts on CN and hold in front, k2, k3tog tbl from CN, k1*, rep from * to * 5 times.
-Rnd4: k around`;
+const DEFAULT_PATTERN = "";
 
 const DEFAULT_GLOSSARY: GlossaryEntry[] = [];
 
@@ -539,6 +536,7 @@ export default function HomePage() {
   const [history, setHistory] = useState<HistoryState[]>([]);
   const [selectedCell, setSelectedCell] = useState<{ row: number; stitch: number } | null>(null);
   const [autoCenterPending, setAutoCenterPending] = useState(false);
+  const [hasLoadedStorage, setHasLoadedStorage] = useState(false);
 
   const [counters, setCounters] = useState<Counter[]>(DEFAULT_COUNTERS);
   const [showPatternPanel, setShowPatternPanel] = useState(false);
@@ -555,6 +553,8 @@ export default function HomePage() {
   useEffect(() => {
     const raw = window.localStorage.getItem(STORAGE_KEY);
     if (!raw) {
+      setShowPatternPanel(true);
+      setHasLoadedStorage(true);
       return;
     }
 
@@ -590,8 +590,14 @@ export default function HomePage() {
       if (Array.isArray(parsed.glossary) && parsed.glossary.length) {
         setGlossary(parsed.glossary);
       }
+      if (!parsed.patternText || !parsed.patternText.trim()) {
+        setShowPatternPanel(true);
+      }
     } catch {
       // Ignore invalid persisted state.
+      setShowPatternPanel(true);
+    } finally {
+      setHasLoadedStorage(true);
     }
   }, []);
 
@@ -621,6 +627,9 @@ export default function HomePage() {
   }, [parseResult.rows, rowIndex, stitchIndex]);
 
   useEffect(() => {
+    if (!hasLoadedStorage) {
+      return;
+    }
     const payload = JSON.stringify({
       patternText,
       startingStitches,
@@ -631,7 +640,7 @@ export default function HomePage() {
       glossary
     });
     window.localStorage.setItem(STORAGE_KEY, payload);
-  }, [patternText, startingStitches, rowIndex, stitchIndex, completedRows, counters, glossary]);
+  }, [hasLoadedStorage, patternText, startingStitches, rowIndex, stitchIndex, completedRows, counters, glossary]);
 
   useEffect(() => {
     if (!rowToast) {
@@ -854,6 +863,20 @@ export default function HomePage() {
     setCounters((prev) => prev.map((counter) => (counter.id === counterId ? { ...counter, name } : counter)));
   }
 
+  async function pastePatternFromClipboard() {
+    try {
+      const text = await navigator.clipboard.readText();
+      if (!text.trim()) {
+        setRowToast("Clipboard is empty.");
+        return;
+      }
+      setPatternText(text);
+      setRowToast("Pattern pasted from clipboard.");
+    } catch {
+      setRowToast("Clipboard access unavailable. Paste manually.");
+    }
+  }
+
   function importGlossaryFromPaste(event: FormEvent) {
     event.preventDefault();
     const { entries, errors } = parseGlossaryPaste(glossaryPaste);
@@ -868,9 +891,10 @@ export default function HomePage() {
   const currentOrdinal = currentStitch?.ordinal ?? 0;
   const stitchProgress = currentRow ? `${currentOrdinal} / ${currentRow.numberedStitches}` : "-";
   const remainingStitches = currentRow ? Math.max(0, currentRow.numberedStitches - currentOrdinal) : 0;
+  const hasPatternInput = patternText.trim().length > 0;
 
   return (
-    <main className="app-shell">
+      <main className="app-shell">
       <header className="toolbar card">
         <div className="brand">
           <p className="eyebrow">WhichStitch</p>
@@ -882,12 +906,137 @@ export default function HomePage() {
           <span>{currentRow ? `${currentRow.startCount} -> ${currentRow.endCount} sts` : `${startingStitches} sts`}</span>
         </div>
         <div className="toolbar-actions">
-          <button type="button" className="ghost" onClick={() => setShowPatternPanel((prev) => !prev)}>
-            {showPatternPanel ? "Hide Pattern" : "Pattern"}
-          </button>
-          <button type="button" className="ghost" onClick={() => setShowGlossaryPanel((prev) => !prev)}>
-            {showGlossaryPanel ? "Hide Glossary" : "Glossary"}
-          </button>
+          <div className="toolbar-popover-anchor">
+            <button
+              type="button"
+              className="ghost"
+              onClick={() => {
+                setShowPatternPanel((prev) => {
+                  const next = !prev;
+                  if (next) {
+                    setShowGlossaryPanel(false);
+                  }
+                  return next;
+                });
+              }}
+            >
+              {showPatternPanel ? "Hide Pattern" : "Pattern"}
+            </button>
+            {showPatternPanel ? (
+              <section className="card utility-panel toolbar-popover toolbar-popover-pattern">
+                <div className="section-heading">
+                  <h2>Pattern Input</h2>
+                  <button type="button" className="ghost" onClick={pastePatternFromClipboard}>
+                    Paste
+                  </button>
+                </div>
+                <p className="muted">`RndN: ...` or `RowN: ...` per line</p>
+                <div className="start-row">
+                  <label htmlFor="starting-stitches" className="muted">
+                    Starting stitches
+                  </label>
+                  <input
+                    id="starting-stitches"
+                    type="number"
+                    min={1}
+                    value={startingStitches}
+                    onChange={(event) => setStartingStitches(Math.max(1, Number(event.target.value) || 1))}
+                  />
+                </div>
+                <textarea
+                  value={patternText}
+                  onChange={(event) => setPatternText(event.target.value)}
+                  className="pattern-input"
+                  rows={12}
+                  spellCheck={false}
+                />
+                {parseResult.errors.length ? (
+                  <ul className="errors">
+                    {parseResult.errors.map((error) => (
+                      <li key={error}>{error}</li>
+                    ))}
+                  </ul>
+                ) : (
+                  <p className="muted">{parseResult.rows.length} row(s) parsed successfully.</p>
+                )}
+                {parseResult.warnings.length ? (
+                  <ul className="warnings">
+                    {parseResult.warnings.map((warning) => (
+                      <li key={warning}>{warning}</li>
+                    ))}
+                  </ul>
+                ) : null}
+              </section>
+            ) : null}
+          </div>
+
+          <div className="toolbar-popover-anchor">
+            <button
+              type="button"
+              className="ghost"
+              onClick={() => {
+                setShowGlossaryPanel((prev) => {
+                  const next = !prev;
+                  if (next) {
+                    setShowPatternPanel(false);
+                  }
+                  return next;
+                });
+              }}
+            >
+              {showGlossaryPanel ? "Hide Glossary" : "Glossary"}
+            </button>
+            {showGlossaryPanel ? (
+              <section className="card utility-panel toolbar-popover toolbar-popover-glossary">
+                <div className="section-heading">
+                  <h2>Stitch Glossary</h2>
+                  <span className="muted">{filteredGlossary.length} entries</span>
+                </div>
+                {!glossary.length ? (
+                  <form className="glossary-form" onSubmit={importGlossaryFromPaste}>
+                    <p className="muted">
+                      Paste glossary rows as `ABBREV[TAB]Meaning`, one per line.
+                    </p>
+                    <textarea
+                      value={glossaryPaste}
+                      onChange={(event) => setGlossaryPaste(event.target.value)}
+                      placeholder={"BOR\tBeginning of round\nCO\tCast on\n..."}
+                      rows={10}
+                      aria-label="Paste glossary entries"
+                    />
+                    <button type="submit" className="primary">
+                      Parse Glossary Paste
+                    </button>
+                    {glossaryPasteErrors.length ? (
+                      <ul className="errors">
+                        {glossaryPasteErrors.map((error) => (
+                          <li key={error}>{error}</li>
+                        ))}
+                      </ul>
+                    ) : null}
+                  </form>
+                ) : (
+                  <>
+                    <input
+                      value={glossarySearch}
+                      onChange={(event) => setGlossarySearch(event.target.value)}
+                      placeholder="Search by code or meaning"
+                      aria-label="Search glossary"
+                    />
+                    <ul className="glossary-list">
+                      {filteredGlossary.map((entry) => (
+                        <li key={entry.code}>
+                          <p className="glossary-code">{entry.code}</p>
+                          <span>{entry.detail}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  </>
+                )}
+              </section>
+            ) : null}
+          </div>
+
           <button type="button" className="primary" onClick={addCounter}>
             New Counter
           </button>
@@ -899,7 +1048,14 @@ export default function HomePage() {
           <h2>Stitch Timeline</h2>
           <span className="muted">Scroll any direction, tap any stitch to jump</span>
         </div>
-        {!timeline.length ? <p className="muted">Timeline appears once the pattern parses successfully.</p> : null}
+        {!hasPatternInput ? (
+          <p className="muted">
+            Paste your pattern to begin. Use the `Pattern` button above to open the input panel.
+          </p>
+        ) : null}
+        {hasPatternInput && !timeline.length ? (
+          <p className="muted">Timeline appears once the pattern parses successfully.</p>
+        ) : null}
 
         <div className="timeline-body">
           <aside className="floating-panel">
@@ -1039,99 +1195,6 @@ export default function HomePage() {
         </section>
       ) : null}
 
-      {showPatternPanel ? (
-        <section className="card utility-panel">
-          <div className="section-heading">
-            <h2>Pattern Input</h2>
-            <span className="muted">`RndN: ...` or `RowN: ...` per line</span>
-          </div>
-          <div className="start-row">
-            <label htmlFor="starting-stitches" className="muted">
-              Starting stitches
-            </label>
-            <input
-              id="starting-stitches"
-              type="number"
-              min={1}
-              value={startingStitches}
-              onChange={(event) => setStartingStitches(Math.max(1, Number(event.target.value) || 1))}
-            />
-          </div>
-          <textarea
-            value={patternText}
-            onChange={(event) => setPatternText(event.target.value)}
-            className="pattern-input"
-            rows={12}
-            spellCheck={false}
-          />
-          {parseResult.errors.length ? (
-            <ul className="errors">
-              {parseResult.errors.map((error) => (
-                <li key={error}>{error}</li>
-              ))}
-            </ul>
-          ) : (
-            <p className="muted">{parseResult.rows.length} row(s) parsed successfully.</p>
-          )}
-          {parseResult.warnings.length ? (
-            <ul className="warnings">
-              {parseResult.warnings.map((warning) => (
-                <li key={warning}>{warning}</li>
-              ))}
-            </ul>
-          ) : null}
-        </section>
-      ) : null}
-
-      {showGlossaryPanel ? (
-        <section className="card utility-panel">
-          <div className="section-heading">
-            <h2>Stitch Glossary</h2>
-            <span className="muted">{filteredGlossary.length} entries</span>
-          </div>
-          {!glossary.length ? (
-            <form className="glossary-form" onSubmit={importGlossaryFromPaste}>
-              <p className="muted">
-                Paste glossary rows as `ABBREV[TAB]Meaning`, one per line.
-              </p>
-              <textarea
-                value={glossaryPaste}
-                onChange={(event) => setGlossaryPaste(event.target.value)}
-                placeholder={"BOR\tBeginning of round\nCO\tCast on\n..."}
-                rows={10}
-                aria-label="Paste glossary entries"
-              />
-              <button type="submit" className="primary">
-                Parse Glossary Paste
-              </button>
-              {glossaryPasteErrors.length ? (
-                <ul className="errors">
-                  {glossaryPasteErrors.map((error) => (
-                    <li key={error}>{error}</li>
-                  ))}
-                </ul>
-              ) : null}
-            </form>
-          ) : (
-            <>
-              <input
-                value={glossarySearch}
-                onChange={(event) => setGlossarySearch(event.target.value)}
-                placeholder="Search by code or meaning"
-                aria-label="Search glossary"
-              />
-              <ul className="glossary-list">
-                {filteredGlossary.map((entry) => (
-                  <li key={entry.code}>
-                    <p className="glossary-code">{entry.code}</p>
-                    <span>{entry.detail}</span>
-                  </li>
-                ))}
-              </ul>
-            </>
-          )}
-        </section>
-      ) : null}
-    </main>
+      </main>
   );
 }
