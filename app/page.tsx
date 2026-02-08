@@ -7,6 +7,8 @@ type StitchStep = {
   code: string;
   count: number;
   label: string;
+  numbered: boolean;
+  ordinal: number;
 };
 
 type PatternRow = {
@@ -16,6 +18,7 @@ type PatternRow = {
   sequence: StitchStep[];
   expanded: StitchStep[];
   totalStitches: number;
+  numberedStitches: number;
   startCount: number;
   endCount: number;
 };
@@ -57,10 +60,11 @@ type ParsedOperation = {
   consume: number;
   produce: number;
   units: number;
+  countsTowardStitch: boolean;
   warning?: string;
 };
 
-const STORAGE_KEY = "loop-ledger-state-v2";
+const STORAGE_KEY = "whichstitch-state-v2";
 const DEFAULT_STARTING_STITCHES = 90;
 
 const DEFAULT_PATTERN = `Rnd1: *k3, k1yok1, k1, k1yok1, k6, k1yok1, k1, k1yok1, k3*, rep from * to * 5 times.
@@ -68,54 +72,7 @@ Rnd2: *k3, sl7, k6, sl7, k3*, rep from * to * 5 times.
 Rnd3: *k1, place 2 sts on CN and hold to the back, k3tog tbl, k2 from CN, k1, place 3 sts on CN and hold in front, k2, k3tog tbl from CN, k1*, rep from * to * 5 times.
 Rnd4: k around`;
 
-const DEFAULT_GLOSSARY: GlossaryEntry[] = [
-  {
-    code: "K",
-    title: "Knit",
-    detail: "Insert right needle front-to-back through the stitch, wrap yarn, and pull a new loop through."
-  },
-  {
-    code: "P",
-    title: "Purl",
-    detail: "Insert right needle right-to-left through the stitch, wrap yarn at front, and pull through."
-  },
-  {
-    code: "YO",
-    title: "Yarn Over",
-    detail: "Bring yarn over needle to create a new stitch and an eyelet opening."
-  },
-  {
-    code: "K2TOG",
-    title: "Knit Two Together",
-    detail: "A right-leaning decrease made by knitting two stitches as one."
-  },
-  {
-    code: "K3TOG",
-    title: "Knit Three Together",
-    detail: "A decrease that works three stitches together into one stitch."
-  },
-  {
-    code: "SSK",
-    title: "Slip Slip Knit",
-    detail: "A left-leaning decrease made by slipping two stitches then knitting them together through the back loop."
-  },
-  {
-    code: "CDD",
-    title: "Centered Double Decrease",
-    detail: "Decrease two stitches at once so the center stitch stays visually centered."
-  },
-  { code: "SL", title: "Slip", detail: "Move stitch(es) to the right needle without knitting or purling them." },
-  {
-    code: "K1YOK1",
-    title: "K1, YO, K1 (same stitch)",
-    detail: "Work knit, yarn over, knit into one stitch. Net increase: +2 stitches."
-  },
-  {
-    code: "CN",
-    title: "Cable Needle",
-    detail: "Place stitches on a cable needle and hold to the front or back while crossing stitches."
-  }
-];
+const DEFAULT_GLOSSARY: GlossaryEntry[] = [];
 
 const DEFAULT_COUNTERS: Counter[] = [];
 
@@ -154,6 +111,61 @@ function getGlossaryLabel(code: string, glossaryMap: Map<string, GlossaryEntry>)
   }
 
   return code;
+}
+
+function parseGlossaryPaste(text: string): { entries: GlossaryEntry[]; errors: string[] } {
+  const lines = text
+    .replace(/\r/g, "")
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  const entries: GlossaryEntry[] = [];
+  const errors: string[] = [];
+  const seen = new Set<string>();
+
+  lines.forEach((line, index) => {
+    let code = "";
+    let meaning = "";
+
+    if (line.includes("\t")) {
+      const [left, ...rest] = line.split("\t");
+      code = left.trim();
+      meaning = rest.join(" ").trim();
+    } else if (line.includes(":")) {
+      const colonIndex = line.indexOf(":");
+      code = line.slice(0, colonIndex).trim();
+      meaning = line.slice(colonIndex + 1).trim();
+    } else {
+      const match = line.match(/^(\S+)\s{2,}(.+)$/);
+      if (match) {
+        code = match[1].trim();
+        meaning = match[2].trim();
+      } else {
+        errors.push(`Line ${index + 1}: expected \"ABBREV<TAB>Meaning\" format.`);
+        return;
+      }
+    }
+
+    if (!code || !meaning) {
+      errors.push(`Line ${index + 1}: missing abbreviation or meaning.`);
+      return;
+    }
+
+    const normalized = normalizeCode(code);
+    if (seen.has(normalized)) {
+      return;
+    }
+    seen.add(normalized);
+
+    entries.push({
+      code,
+      title: meaning,
+      detail: meaning
+    });
+  });
+
+  return { entries, errors };
 }
 
 function parseRoundDrafts(input: string): { drafts: RoundDraft[]; errors: string[] } {
@@ -232,7 +244,8 @@ function parseSingleOperation(token: string, glossaryMap: Map<string, GlossaryEn
       label: getGlossaryLabel("k", glossaryMap),
       consume: 1,
       produce: 1,
-      units: 1
+      units: 1,
+      countsTowardStitch: true
     };
   }
 
@@ -243,7 +256,8 @@ function parseSingleOperation(token: string, glossaryMap: Map<string, GlossaryEn
       label: "Cable setup",
       consume: 0,
       produce: 0,
-      units: 1
+      units: 1,
+      countsTowardStitch: false
     };
   }
 
@@ -255,7 +269,8 @@ function parseSingleOperation(token: string, glossaryMap: Map<string, GlossaryEn
       label: "Knit from cable needle",
       consume: count,
       produce: count,
-      units: count
+      units: count,
+      countsTowardStitch: true
     };
   }
 
@@ -265,7 +280,8 @@ function parseSingleOperation(token: string, glossaryMap: Map<string, GlossaryEn
       label: getGlossaryLabel("k1yok1", glossaryMap),
       consume: 1,
       produce: 3,
-      units: 1
+      units: 1,
+      countsTowardStitch: true
     };
   }
 
@@ -275,7 +291,8 @@ function parseSingleOperation(token: string, glossaryMap: Map<string, GlossaryEn
       label: getGlossaryLabel("yo", glossaryMap),
       consume: 0,
       produce: 1,
-      units: 1
+      units: 1,
+      countsTowardStitch: true
     };
   }
 
@@ -285,7 +302,8 @@ function parseSingleOperation(token: string, glossaryMap: Map<string, GlossaryEn
       label: getGlossaryLabel("CDD", glossaryMap),
       consume: 3,
       produce: 1,
-      units: 3
+      units: 1,
+      countsTowardStitch: true
     };
   }
 
@@ -299,7 +317,8 @@ function parseSingleOperation(token: string, glossaryMap: Map<string, GlossaryEn
       label: getGlossaryLabel(`k${count}tog`, glossaryMap),
       consume: count,
       produce: 1,
-      units: count
+      units: 1,
+      countsTowardStitch: true
     };
   }
 
@@ -311,7 +330,8 @@ function parseSingleOperation(token: string, glossaryMap: Map<string, GlossaryEn
       label: getGlossaryLabel(`sl${count}`, glossaryMap),
       consume: count,
       produce: count,
-      units: count
+      units: count,
+      countsTowardStitch: true
     };
   }
 
@@ -324,7 +344,8 @@ function parseSingleOperation(token: string, glossaryMap: Map<string, GlossaryEn
       label: getGlossaryLabel(`${op}${count}`, glossaryMap),
       consume: count,
       produce: count,
-      units: count
+      units: count,
+      countsTowardStitch: true
     };
   }
 
@@ -336,7 +357,8 @@ function parseSingleOperation(token: string, glossaryMap: Map<string, GlossaryEn
       label: getGlossaryLabel(op, glossaryMap),
       consume: 1,
       produce: 1,
-      units: 1
+      units: 1,
+      countsTowardStitch: true
     };
   }
 
@@ -346,6 +368,7 @@ function parseSingleOperation(token: string, glossaryMap: Map<string, GlossaryEn
     consume: 1,
     produce: 1,
     units: 1,
+    countsTowardStitch: true,
     warning: `Unknown token \"${value}\" used fallback consume=1/produce=1.`
   };
 }
@@ -363,7 +386,8 @@ function parseBodyOperations(body: string, currentStitches: number, glossaryMap:
           label: getGlossaryLabel("k", glossaryMap),
           consume: stitches,
           produce: stitches,
-          units: stitches
+          units: stitches,
+          countsTowardStitch: true
         }
       ],
       warnings
@@ -440,17 +464,25 @@ function parsePatternRows(input: string, glossary: GlossaryEntry[], startingStit
         key: `${draft.roundNumber}-${index}-${normalizeCode(operation.code)}`,
         code: operation.code,
         count: operation.units,
-        label: operation.label
+        label: operation.label,
+        numbered: operation.countsTowardStitch,
+        ordinal: 0
       }));
 
       const expanded: StitchStep[] = [];
+      let runningOrdinal = 0;
       sequence.forEach((step, stepIndex) => {
         for (let i = 0; i < step.count; i += 1) {
+          if (step.numbered) {
+            runningOrdinal += 1;
+          }
           expanded.push({
             key: `${step.key}-${stepIndex}-${i}`,
             code: step.code,
             count: 1,
-            label: step.label
+            label: step.label,
+            numbered: step.numbered,
+            ordinal: runningOrdinal
           });
         }
       });
@@ -466,6 +498,7 @@ function parsePatternRows(input: string, glossary: GlossaryEntry[], startingStit
         sequence,
         expanded,
         totalStitches: expanded.length,
+        numberedStitches: runningOrdinal,
         startCount,
         endCount
       });
@@ -513,9 +546,8 @@ export default function HomePage() {
 
   const [glossary, setGlossary] = useState<GlossaryEntry[]>(DEFAULT_GLOSSARY);
   const [glossarySearch, setGlossarySearch] = useState("");
-  const [newCode, setNewCode] = useState("");
-  const [newTitle, setNewTitle] = useState("");
-  const [newDetail, setNewDetail] = useState("");
+  const [glossaryPaste, setGlossaryPaste] = useState("");
+  const [glossaryPasteErrors, setGlossaryPasteErrors] = useState<string[]>([]);
 
   const timelineViewportRef = useRef<HTMLDivElement | null>(null);
   const hasCenteredInitialRef = useRef(false);
@@ -760,7 +792,9 @@ export default function HomePage() {
     setRowIndex(selectedCell.row);
     setStitchIndex(selectedCell.stitch);
     setCompletedRows(selectedCell.row);
-    setRowToast(`Moved to ${parseResult.rows[selectedCell.row]?.rowLabel}, stitch ${selectedCell.stitch + 1}.`);
+    const target = parseResult.rows[selectedCell.row]?.expanded[selectedCell.stitch];
+    const targetLabel = target?.numbered ? `stitch ${target.ordinal}` : "unnumbered step";
+    setRowToast(`Moved to ${parseResult.rows[selectedCell.row]?.rowLabel}, ${targetLabel}.`);
     setSelectedCell(null);
   }
 
@@ -820,43 +854,26 @@ export default function HomePage() {
     setCounters((prev) => prev.map((counter) => (counter.id === counterId ? { ...counter, name } : counter)));
   }
 
-  function addGlossaryEntry(event: FormEvent) {
+  function importGlossaryFromPaste(event: FormEvent) {
     event.preventDefault();
-    const code = newCode.trim();
-    const title = newTitle.trim();
-    const detail = newDetail.trim();
-    if (!code || !title || !detail) {
+    const { entries, errors } = parseGlossaryPaste(glossaryPaste);
+    setGlossaryPasteErrors(errors);
+    if (errors.length || !entries.length) {
       return;
     }
-
-    const normalized = normalizeCode(code);
-    setGlossary((prev) => {
-      const existing = prev.find((entry) => normalizeCode(entry.code) === normalized);
-      if (existing) {
-        return prev.map((entry) =>
-          normalizeCode(entry.code) === normalized ? { ...entry, code, title, detail } : entry
-        );
-      }
-
-      return [...prev, { code, title, detail }];
-    });
-
-    setNewCode("");
-    setNewTitle("");
-    setNewDetail("");
+    setGlossary(entries);
+    setGlossaryPaste("");
   }
 
-  const stitchProgress = currentRow
-    ? `${Math.min(stitchIndex + 1, currentRow.totalStitches)} / ${currentRow.totalStitches}`
-    : "-";
-
-  const remainingStitches = currentRow ? Math.max(0, currentRow.totalStitches - (stitchIndex + 1)) : 0;
+  const currentOrdinal = currentStitch?.ordinal ?? 0;
+  const stitchProgress = currentRow ? `${currentOrdinal} / ${currentRow.numberedStitches}` : "-";
+  const remainingStitches = currentRow ? Math.max(0, currentRow.numberedStitches - currentOrdinal) : 0;
 
   return (
     <main className="app-shell">
       <header className="toolbar card">
         <div className="brand">
-          <p className="eyebrow">Loop Ledger</p>
+          <p className="eyebrow">WhichStitch</p>
           <h1>Pattern Map</h1>
         </div>
         <div className="toolbar-stats">
@@ -961,7 +978,7 @@ export default function HomePage() {
                           className={cellClass}
                           onClick={() => setSelectedCell({ row: rowIdx, stitch: stitchIdx })}
                         >
-                          <span className="cell-index">{stitchIdx + 1}</span>
+                          <span className="cell-index">{step.numbered ? step.ordinal : ""}</span>
                           <span className="cell-code">{step.code}</span>
                         </button>
                         {isSelected ? (
@@ -1072,30 +1089,47 @@ export default function HomePage() {
             <h2>Stitch Glossary</h2>
             <span className="muted">{filteredGlossary.length} entries</span>
           </div>
-          <input
-            value={glossarySearch}
-            onChange={(event) => setGlossarySearch(event.target.value)}
-            placeholder="Search by code, name, or definition"
-            aria-label="Search glossary"
-          />
-          <form className="glossary-form" onSubmit={addGlossaryEntry}>
-            <input value={newCode} onChange={(event) => setNewCode(event.target.value)} placeholder="Code (e.g. M1L)" />
-            <input value={newTitle} onChange={(event) => setNewTitle(event.target.value)} placeholder="Name" />
-            <textarea value={newDetail} onChange={(event) => setNewDetail(event.target.value)} placeholder="Definition" rows={3} />
-            <button type="submit" className="primary">
-              Save Stitch
-            </button>
-          </form>
-          <ul className="glossary-list">
-            {filteredGlossary.map((entry) => (
-              <li key={entry.code}>
-                <p>
-                  <strong>{entry.code}</strong> - {entry.title}
-                </p>
-                <span>{entry.detail}</span>
-              </li>
-            ))}
-          </ul>
+          {!glossary.length ? (
+            <form className="glossary-form" onSubmit={importGlossaryFromPaste}>
+              <p className="muted">
+                Paste glossary rows as `ABBREV[TAB]Meaning`, one per line.
+              </p>
+              <textarea
+                value={glossaryPaste}
+                onChange={(event) => setGlossaryPaste(event.target.value)}
+                placeholder={"BOR\tBeginning of round\nCO\tCast on\n..."}
+                rows={10}
+                aria-label="Paste glossary entries"
+              />
+              <button type="submit" className="primary">
+                Parse Glossary Paste
+              </button>
+              {glossaryPasteErrors.length ? (
+                <ul className="errors">
+                  {glossaryPasteErrors.map((error) => (
+                    <li key={error}>{error}</li>
+                  ))}
+                </ul>
+              ) : null}
+            </form>
+          ) : (
+            <>
+              <input
+                value={glossarySearch}
+                onChange={(event) => setGlossarySearch(event.target.value)}
+                placeholder="Search by code or meaning"
+                aria-label="Search glossary"
+              />
+              <ul className="glossary-list">
+                {filteredGlossary.map((entry) => (
+                  <li key={entry.code}>
+                    <p className="glossary-code">{entry.code}</p>
+                    <span>{entry.detail}</span>
+                  </li>
+                ))}
+              </ul>
+            </>
+          )}
         </section>
       ) : null}
     </main>

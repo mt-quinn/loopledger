@@ -1,6 +1,6 @@
-# Loop Ledger
+# WhichStitch
 
-Loop Ledger is a mobile-first knit counter web app built with Next.js and prepared for Vercel hosting.
+WhichStitch is a mobile-first knit counter web app built with Next.js and prepared for Vercel hosting.
 
 ## Stack
 
@@ -30,5 +30,5 @@ Open `http://localhost:3000`.
 ## Initial structure
 
 - `app/layout.tsx`: page metadata and viewport setup
-- `app/page.tsx`: starter Loop Ledger dashboard shell
+- `app/page.tsx`: starter WhichStitch dashboard shell
 - `app/globals.css`: visual system and responsive layout
