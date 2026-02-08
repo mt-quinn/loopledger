@@ -1,1200 +1,773 @@
 "use client";
 
-import { FormEvent, Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { ChangeEvent, useEffect, useMemo, useRef, useState } from "react";
+import { GlobalWorkerOptions, getDocument, PDFDocumentProxy } from "pdfjs-dist/legacy/build/pdf.mjs";
 
-type StitchStep = {
-  key: string;
-  code: string;
-  count: number;
+type ViewerMode = "pan" | "highlight";
+type DrawTool = "rectangle" | "line" | "highlight";
+type CounterType = "row" | "stitch";
+
+type PageMetric = {
+  width: number;
+  height: number;
+};
+
+type Annotation = {
+  id: string;
+  pageIndex: number;
+  kind: DrawTool;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  x2?: number;
+  y2?: number;
+};
+
+type KnitCounter = {
+  id: string;
+  pageIndex: number;
+  x: number;
+  y: number;
+  type: CounterType;
   label: string;
-  numbered: boolean;
-  ordinal: number;
-};
-
-type PatternRow = {
-  id: string;
-  raw: string;
-  rowLabel: string;
-  sequence: StitchStep[];
-  expanded: StitchStep[];
-  totalStitches: number;
-  numberedStitches: number;
-  startCount: number;
-  endCount: number;
-};
-
-type Counter = {
-  id: string;
-  name: string;
   value: number;
-  contributes: boolean;
 };
 
-type GlossaryEntry = {
-  code: string;
-  title: string;
-  detail: string;
+type PersistedState = {
+  zoom: number;
+  highlights: Annotation[];
+  counters: KnitCounter[];
 };
 
-type ParseResult = {
-  rows: PatternRow[];
-  errors: string[];
-  warnings: string[];
-};
+const STORAGE_KEY = "whichstitch-pdf-workspace-v1";
+const MIN_ZOOM = 0.5;
+const MAX_ZOOM = 2.4;
 
-type HistoryState = {
-  rowIndex: number;
-  stitchIndex: number;
-  completedRows: number;
-};
-
-type RoundDraft = {
-  roundNumber: number;
-  body: string;
-  raw: string;
-};
-
-type ParsedOperation = {
-  code: string;
-  label: string;
-  consume: number;
-  produce: number;
-  units: number;
-  countsTowardStitch: boolean;
-  warning?: string;
-};
-
-const STORAGE_KEY = "whichstitch-state-v2";
-const DEFAULT_STARTING_STITCHES = 90;
-
-const DEFAULT_PATTERN = "";
-
-const DEFAULT_GLOSSARY: GlossaryEntry[] = [];
-
-const DEFAULT_COUNTERS: Counter[] = [];
-
-function normalizeCode(value: string): string {
-  return value.replace(/[^A-Za-z0-9]/g, "").toUpperCase();
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value));
 }
 
-function cleanToken(value: string): string {
-  return value.replace(/^"|"$/g, "").replace(/\.+$/, "").trim();
-}
-
-function parsePositiveInt(value: string | undefined, fallback = 1): number {
-  const num = Number(value);
-  return Number.isFinite(num) && num > 0 ? num : fallback;
-}
-
-function normalizeBodyText(value: string): string {
-  return value.replace(/\s+/g, " ").trim();
-}
-
-function getGlossaryLabel(code: string, glossaryMap: Map<string, GlossaryEntry>): string {
-  const normalized = normalizeCode(code);
-  const exact = glossaryMap.get(normalized);
-  if (exact) {
-    return exact.title;
-  }
-
-  if (/^k\d*$/i.test(code)) {
-    return "Knit";
-  }
-  if (/^p\d*$/i.test(code)) {
-    return "Purl";
-  }
-  if (/^sl\d*$/i.test(code)) {
-    return "Slip";
-  }
-
-  return code;
-}
-
-function parseGlossaryPaste(text: string): { entries: GlossaryEntry[]; errors: string[] } {
-  const lines = text
-    .replace(/\r/g, "")
-    .split("\n")
-    .map((line) => line.trim())
-    .filter(Boolean);
-
-  const entries: GlossaryEntry[] = [];
-  const errors: string[] = [];
-  const seen = new Set<string>();
-
-  lines.forEach((line, index) => {
-    let code = "";
-    let meaning = "";
-
-    if (line.includes("\t")) {
-      const [left, ...rest] = line.split("\t");
-      code = left.trim();
-      meaning = rest.join(" ").trim();
-    } else if (line.includes(":")) {
-      const colonIndex = line.indexOf(":");
-      code = line.slice(0, colonIndex).trim();
-      meaning = line.slice(colonIndex + 1).trim();
-    } else {
-      const match = line.match(/^(\S+)\s{2,}(.+)$/);
-      if (match) {
-        code = match[1].trim();
-        meaning = match[2].trim();
-      } else {
-        errors.push(`Line ${index + 1}: expected \"ABBREV<TAB>Meaning\" format.`);
-        return;
-      }
-    }
-
-    if (!code || !meaning) {
-      errors.push(`Line ${index + 1}: missing abbreviation or meaning.`);
-      return;
-    }
-
-    const normalized = normalizeCode(code);
-    if (seen.has(normalized)) {
-      return;
-    }
-    seen.add(normalized);
-
-    entries.push({
-      code,
-      title: meaning,
-      detail: meaning
-    });
-  });
-
-  return { entries, errors };
-}
-
-function parseRoundDrafts(input: string): { drafts: RoundDraft[]; errors: string[] } {
-  const errors: string[] = [];
-  const drafts: RoundDraft[] = [];
-
-  const rawLines = input
-    .replace(/\r/g, "")
-    .split("\n")
-    .map((line) => line.trim())
-    .filter(Boolean);
-
-  const logicalLines: string[] = [];
-
-  rawLines.forEach((line) => {
-    if (/^note\s*:/i.test(line)) {
-      return;
-    }
-
-    if (/^(Rnds?|Rows?)\s*\d/i.test(line)) {
-      logicalLines.push(line);
-      return;
-    }
-
-    if (!logicalLines.length) {
-      errors.push(`Unexpected continuation without round header: \"${line}\"`);
-      return;
-    }
-
-    logicalLines[logicalLines.length - 1] = `${logicalLines[logicalLines.length - 1]} ${line}`;
-  });
-
-  logicalLines.forEach((line) => {
-    const headerRegex = /(Rnds?|Rows?)\s*[\d,\s]+:/gi;
-    const matches = [...line.matchAll(headerRegex)];
-
-    if (!matches.length) {
-      errors.push(`Could not find round header in: \"${line}\"`);
-      return;
-    }
-
-    matches.forEach((match, index) => {
-      const header = match[0];
-      const headerStart = match.index ?? 0;
-      const bodyStart = headerStart + header.length;
-      const bodyEnd = index < matches.length - 1 ? matches[index + 1].index ?? line.length : line.length;
-      const body = normalizeBodyText(line.slice(bodyStart, bodyEnd));
-
-      const numbers = header.match(/\d+/g)?.map((value) => Number(value)) ?? [];
-      if (!numbers.length) {
-        errors.push(`No round numbers found in header \"${header}\".`);
-        return;
-      }
-
-      numbers.forEach((roundNumber) => {
-        drafts.push({
-          roundNumber,
-          body,
-          raw: `${header} ${body}`.trim()
-        });
-      });
-    });
-  });
-
-  return { drafts, errors };
-}
-
-function parseSingleOperation(token: string, glossaryMap: Map<string, GlossaryEntry>): ParsedOperation {
-  const value = cleanToken(token);
-  const normalizedValue = value.toLowerCase().replace(/\s+/g, " ");
-
-  const kAroundMatch = normalizedValue.match(/^k\s+around$/i);
-  if (kAroundMatch) {
-    return {
-      code: "k",
-      label: getGlossaryLabel("k", glossaryMap),
-      consume: 1,
-      produce: 1,
-      units: 1,
-      countsTowardStitch: true
-    };
-  }
-
-  const placeOnCNMatch = normalizedValue.match(/^place\s+(\d+)\s+sts?\s+on\s+cn\s+and\s+hold\s+(?:to\s+the\s+back|in\s+front)$/i);
-  if (placeOnCNMatch) {
-    return {
-      code: `place${placeOnCNMatch[1]}CN`,
-      label: "Cable setup",
-      consume: 0,
-      produce: 0,
-      units: 1,
-      countsTowardStitch: false
-    };
-  }
-
-  const fromCNMatch = normalizedValue.match(/^k(\d+)\s+from\s+cn$/i);
-  if (fromCNMatch) {
-    const count = parsePositiveInt(fromCNMatch[1]);
-    return {
-      code: `k${count} from CN`,
-      label: "Knit from cable needle",
-      consume: count,
-      produce: count,
-      units: count,
-      countsTowardStitch: true
-    };
-  }
-
-  if (/^k1yok1$/i.test(normalizedValue)) {
-    return {
-      code: "k1yok1",
-      label: getGlossaryLabel("k1yok1", glossaryMap),
-      consume: 1,
-      produce: 3,
-      units: 1,
-      countsTowardStitch: true
-    };
-  }
-
-  if (/^yo$/i.test(normalizedValue)) {
-    return {
-      code: "yo",
-      label: getGlossaryLabel("yo", glossaryMap),
-      consume: 0,
-      produce: 1,
-      units: 1,
-      countsTowardStitch: true
-    };
-  }
-
-  if (/^cdd$/i.test(normalizedValue)) {
-    return {
-      code: "CDD",
-      label: getGlossaryLabel("CDD", glossaryMap),
-      consume: 3,
-      produce: 1,
-      units: 1,
-      countsTowardStitch: true
-    };
-  }
-
-  const kTogMatch = normalizedValue.match(/^k(\d+)tog(?:\s+(tbl|tlb))?(?:\s+from\s+cn)?$/i);
-  if (kTogMatch) {
-    const count = parsePositiveInt(kTogMatch[1]);
-    const suffix = kTogMatch[2] ? ` ${kTogMatch[2].toLowerCase() === "tlb" ? "tbl" : kTogMatch[2].toLowerCase()}` : "";
-    const code = `k${count}tog${suffix}`;
-    return {
-      code,
-      label: getGlossaryLabel(`k${count}tog`, glossaryMap),
-      consume: count,
-      produce: 1,
-      units: 1,
-      countsTowardStitch: true
-    };
-  }
-
-  const slipCountMatch = normalizedValue.match(/^sl(\d+)$/i);
-  if (slipCountMatch) {
-    const count = parsePositiveInt(slipCountMatch[1]);
-    return {
-      code: `sl${count}`,
-      label: getGlossaryLabel(`sl${count}`, glossaryMap),
-      consume: count,
-      produce: count,
-      units: count,
-      countsTowardStitch: true
-    };
-  }
-
-  const basicCountMatch = normalizedValue.match(/^([kp])(\d+)$/i);
-  if (basicCountMatch) {
-    const op = basicCountMatch[1].toLowerCase();
-    const count = parsePositiveInt(basicCountMatch[2]);
-    return {
-      code: `${op}${count}`,
-      label: getGlossaryLabel(`${op}${count}`, glossaryMap),
-      consume: count,
-      produce: count,
-      units: count,
-      countsTowardStitch: true
-    };
-  }
-
-  const singleStitchMatch = normalizedValue.match(/^([kp])$/i);
-  if (singleStitchMatch) {
-    const op = singleStitchMatch[1].toLowerCase();
-    return {
-      code: op,
-      label: getGlossaryLabel(op, glossaryMap),
-      consume: 1,
-      produce: 1,
-      units: 1,
-      countsTowardStitch: true
-    };
-  }
-
-  return {
-    code: value,
-    label: value,
-    consume: 1,
-    produce: 1,
-    units: 1,
-    countsTowardStitch: true,
-    warning: `Unknown token \"${value}\" used fallback consume=1/produce=1.`
-  };
-}
-
-function parseBodyOperations(body: string, currentStitches: number, glossaryMap: Map<string, GlossaryEntry>): { operations: ParsedOperation[]; warnings: string[] } {
-  const normalizedBody = normalizeBodyText(body);
-  const warnings: string[] = [];
-
-  if (/^k\s+around\.?$/i.test(normalizedBody)) {
-    const stitches = Math.max(1, currentStitches);
-    return {
-      operations: [
-        {
-          code: `k${stitches}`,
-          label: getGlossaryLabel("k", glossaryMap),
-          consume: stitches,
-          produce: stitches,
-          units: stitches,
-          countsTowardStitch: true
-        }
-      ],
-      warnings
-    };
-  }
-
-  const repeatMatch = normalizedBody.match(/^\*(.+)\*\s*,?\s*rep\s+from\s+\*\s+to\s+\*\s+(\d+)\s+times?\.?$/i);
-
-  const parseTokenList = (text: string) =>
-    text
-      .split(",")
-      .map((part) => cleanToken(part))
-      .filter(Boolean)
-      .map((part) => parseSingleOperation(part, glossaryMap));
-
-  let operations: ParsedOperation[] = [];
-
-  if (repeatMatch) {
-    const block = repeatMatch[1].trim();
-    const times = parsePositiveInt(repeatMatch[2]);
-    const blockOps = parseTokenList(block);
-    operations = Array.from({ length: times }, () => blockOps).flat();
-  } else {
-    operations = parseTokenList(normalizedBody);
-  }
-
-  operations.forEach((op) => {
-    if (op.warning) {
-      warnings.push(op.warning);
-    }
-  });
-
-  return { operations, warnings };
-}
-
-function parsePatternRows(input: string, glossary: GlossaryEntry[], startingStitches: number): ParseResult {
-  const glossaryMap = new Map(glossary.map((entry) => [normalizeCode(entry.code), entry]));
-  const { drafts, errors: draftErrors } = parseRoundDrafts(input);
-  const rows: PatternRow[] = [];
-  const errors = [...draftErrors];
-  const warnings: string[] = [];
-
-  let liveStitches = Math.max(1, startingStitches);
-  const resolvedBodies = new Map<number, string>();
-
-  drafts
-    .sort((a, b) => a.roundNumber - b.roundNumber)
-    .forEach((draft) => {
-      const seeMatch = draft.body.match(/^see\s+r(?:nd|ow)?\s*(\d+)\.?$/i);
-      let resolvedBody = draft.body;
-
-      if (seeMatch) {
-        const target = Number(seeMatch[1]);
-        const targetBody = resolvedBodies.get(target);
-        if (!targetBody) {
-          errors.push(`${draft.raw}: could not resolve reference to R${target}.`);
-          return;
-        }
-        resolvedBody = targetBody;
-      }
-
-      resolvedBodies.set(draft.roundNumber, resolvedBody);
-
-      const { operations, warnings: opWarnings } = parseBodyOperations(resolvedBody, liveStitches, glossaryMap);
-
-      warnings.push(...opWarnings.map((warning) => `Rnd${draft.roundNumber}: ${warning}`));
-
-      if (!operations.length) {
-        errors.push(`Rnd${draft.roundNumber}: no instructions parsed.`);
-        return;
-      }
-
-      const sequence: StitchStep[] = operations.map((operation, index) => ({
-        key: `${draft.roundNumber}-${index}-${normalizeCode(operation.code)}`,
-        code: operation.code,
-        count: operation.units,
-        label: operation.label,
-        numbered: operation.countsTowardStitch,
-        ordinal: 0
-      }));
-
-      const expanded: StitchStep[] = [];
-      let runningOrdinal = 0;
-      sequence.forEach((step, stepIndex) => {
-        for (let i = 0; i < step.count; i += 1) {
-          if (step.numbered) {
-            runningOrdinal += 1;
-          }
-          expanded.push({
-            key: `${step.key}-${stepIndex}-${i}`,
-            code: step.code,
-            count: 1,
-            label: step.label,
-            numbered: step.numbered,
-            ordinal: runningOrdinal
-          });
-        }
-      });
-
-      const startCount = liveStitches;
-      const stitchDelta = operations.reduce((sum, operation) => sum + (operation.produce - operation.consume), 0);
-      const endCount = Math.max(0, startCount + stitchDelta);
-
-      rows.push({
-        id: `RND-${draft.roundNumber}`,
-        raw: draft.raw,
-        rowLabel: `RND ${draft.roundNumber}`,
-        sequence,
-        expanded,
-        totalStitches: expanded.length,
-        numberedStitches: runningOrdinal,
-        startCount,
-        endCount
-      });
-
-      liveStitches = endCount;
-    });
-
-  return {
-    rows,
-    errors,
-    warnings: Array.from(new Set(warnings))
-  };
-}
-
-function getTimeline(row: PatternRow | undefined, stitchIndex: number): Array<{ index: number; code: string; active: boolean }> {
-  if (!row || !row.expanded.length) {
-    return [];
-  }
-
-  const start = Math.max(0, stitchIndex - 10);
-  const end = Math.min(row.expanded.length - 1, stitchIndex + 10);
-  const timeline = [];
-
-  for (let i = start; i <= end; i += 1) {
-    timeline.push({ index: i, code: row.expanded[i].code, active: i === stitchIndex });
-  }
-
-  return timeline;
+function formatCounterLabel(type: CounterType): string {
+  return type === "row" ? "Row" : "Stitch";
 }
 
 export default function HomePage() {
-  const [patternText, setPatternText] = useState(DEFAULT_PATTERN);
-  const [startingStitches, setStartingStitches] = useState(DEFAULT_STARTING_STITCHES);
-  const [rowIndex, setRowIndex] = useState(0);
-  const [stitchIndex, setStitchIndex] = useState(0);
-  const [completedRows, setCompletedRows] = useState(0);
-  const [rowToast, setRowToast] = useState<string>("");
-  const [history, setHistory] = useState<HistoryState[]>([]);
-  const [selectedCell, setSelectedCell] = useState<{ row: number; stitch: number } | null>(null);
-  const [autoCenterPending, setAutoCenterPending] = useState(false);
-  const [hasLoadedStorage, setHasLoadedStorage] = useState(false);
+  const [pdfDoc, setPdfDoc] = useState<PDFDocumentProxy | null>(null);
+  const [pdfFileName, setPdfFileName] = useState("No PDF loaded");
+  const [pages, setPages] = useState<PageMetric[]>([]);
+  const [zoom, setZoom] = useState(1.1);
+  const [mode, setMode] = useState<ViewerMode>("pan");
+  const [drawTool, setDrawTool] = useState<DrawTool>("rectangle");
+  const [highlights, setHighlights] = useState<Annotation[]>([]);
+  const [counters, setCounters] = useState<KnitCounter[]>([]);
+  const [editingCounterId, setEditingCounterId] = useState<string | null>(null);
+  const [editingCounterTitle, setEditingCounterTitle] = useState("");
+  const [loadedState, setLoadedState] = useState(false);
 
-  const [counters, setCounters] = useState<Counter[]>(DEFAULT_COUNTERS);
-  const [showPatternPanel, setShowPatternPanel] = useState(false);
-  const [showGlossaryPanel, setShowGlossaryPanel] = useState(false);
+  const canvasRefs = useRef<(HTMLCanvasElement | null)[]>([]);
+  const pageRefs = useRef<(HTMLElement | null)[]>([]);
+  const viewerRef = useRef<HTMLDivElement | null>(null);
+  const counterUndoHistoryRef = useRef<Record<string, number[]>>({});
 
-  const [glossary, setGlossary] = useState<GlossaryEntry[]>(DEFAULT_GLOSSARY);
-  const [glossarySearch, setGlossarySearch] = useState("");
-  const [glossaryPaste, setGlossaryPaste] = useState("");
-  const [glossaryPasteErrors, setGlossaryPasteErrors] = useState<string[]>([]);
+  const drawingRef = useRef<{
+    tool: DrawTool;
+    pageIndex: number;
+    startX: number;
+    startY: number;
+    lastX: number;
+    lastY: number;
+  } | null>(null);
 
-  const timelineViewportRef = useRef<HTMLDivElement | null>(null);
-  const hasCenteredInitialRef = useRef(false);
+  const draggingCounterRef = useRef<{
+    counterId: string;
+    pageIndex: number;
+    offsetX: number;
+    offsetY: number;
+  } | null>(null);
+
+  const panningRef = useRef<{
+    startClientX: number;
+    startClientY: number;
+    startScrollLeft: number;
+    startScrollTop: number;
+  } | null>(null);
+
+  const [draftHighlight, setDraftHighlight] = useState<Annotation | null>(null);
+
+  useEffect(() => {
+    GlobalWorkerOptions.workerSrc = "https://unpkg.com/pdfjs-dist@4.10.38/build/pdf.worker.min.mjs";
+  }, []);
 
   useEffect(() => {
     const raw = window.localStorage.getItem(STORAGE_KEY);
     if (!raw) {
-      setShowPatternPanel(true);
-      setHasLoadedStorage(true);
+      setLoadedState(true);
       return;
     }
 
     try {
-      const parsed = JSON.parse(raw) as {
-        patternText?: string;
-        startingStitches?: number;
-        rowIndex?: number;
-        stitchIndex?: number;
-        completedRows?: number;
-        counters?: Counter[];
-        glossary?: GlossaryEntry[];
-      };
-
-      if (parsed.patternText) {
-        setPatternText(parsed.patternText);
+      const parsed = JSON.parse(raw) as PersistedState;
+      if (typeof parsed.zoom === "number") {
+        setZoom(clamp(parsed.zoom, MIN_ZOOM, MAX_ZOOM));
       }
-      if (typeof parsed.startingStitches === "number") {
-        setStartingStitches(parsed.startingStitches);
+      if (Array.isArray(parsed.highlights)) {
+        setHighlights(parsed.highlights);
       }
-      if (typeof parsed.rowIndex === "number") {
-        setRowIndex(parsed.rowIndex);
-      }
-      if (typeof parsed.stitchIndex === "number") {
-        setStitchIndex(parsed.stitchIndex);
-      }
-      if (typeof parsed.completedRows === "number") {
-        setCompletedRows(parsed.completedRows);
-      }
-      if (Array.isArray(parsed.counters) && parsed.counters.length) {
-        setCounters(parsed.counters);
-      }
-      if (Array.isArray(parsed.glossary) && parsed.glossary.length) {
-        setGlossary(parsed.glossary);
-      }
-      if (!parsed.patternText || !parsed.patternText.trim()) {
-        setShowPatternPanel(true);
+      if (Array.isArray(parsed.counters)) {
+        setCounters(parsed.counters.map((counter) => ({ ...counter })));
       }
     } catch {
-      // Ignore invalid persisted state.
-      setShowPatternPanel(true);
+      // Ignore invalid saved tool state.
     } finally {
-      setHasLoadedStorage(true);
+      setLoadedState(true);
     }
   }, []);
 
-  const parseResult = useMemo(
-    () => parsePatternRows(patternText, glossary, startingStitches),
-    [patternText, glossary, startingStitches]
-  );
-  const currentRow = parseResult.rows[rowIndex];
+  useEffect(() => {
+    if (!loadedState) {
+      return;
+    }
+
+    const payload: PersistedState = {
+      zoom,
+      highlights,
+      counters
+    };
+
+    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
+  }, [loadedState, zoom, highlights, counters]);
 
   useEffect(() => {
-    if (!parseResult.rows.length) {
-      setRowIndex(0);
-      setStitchIndex(0);
+    if (!pdfDoc || !pages.length) {
       return;
     }
 
-    if (rowIndex > parseResult.rows.length - 1) {
-      setRowIndex(0);
-      setStitchIndex(0);
-      return;
+    const doc = pdfDoc;
+    let cancelled = false;
+
+    async function renderPages() {
+      for (let pageIndex = 0; pageIndex < pages.length; pageIndex += 1) {
+        const canvas = canvasRefs.current[pageIndex];
+        if (!canvas) {
+          continue;
+        }
+
+        const page = await doc.getPage(pageIndex + 1);
+        const viewport = page.getViewport({ scale: zoom });
+        const context = canvas.getContext("2d");
+
+        if (!context || cancelled) {
+          continue;
+        }
+
+        canvas.width = Math.floor(viewport.width);
+        canvas.height = Math.floor(viewport.height);
+        canvas.style.width = `${viewport.width}px`;
+        canvas.style.height = `${viewport.height}px`;
+
+        await page.render({ canvasContext: context, viewport }).promise;
+      }
     }
 
-    const row = parseResult.rows[rowIndex];
-    if (stitchIndex > row.totalStitches - 1) {
-      setStitchIndex(Math.max(0, row.totalStitches - 1));
-    }
-  }, [parseResult.rows, rowIndex, stitchIndex]);
+    renderPages();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [pdfDoc, pages, zoom]);
 
   useEffect(() => {
-    if (!hasLoadedStorage) {
-      return;
+    function handlePointerMove(event: MouseEvent) {
+      const drawing = drawingRef.current;
+      if (drawing) {
+        const pageElement = pageRefs.current[drawing.pageIndex];
+        if (!pageElement) {
+          return;
+        }
+
+        const rect = pageElement.getBoundingClientRect();
+        const x = clamp((event.clientX - rect.left) / zoom, 0, pages[drawing.pageIndex]?.width ?? 0);
+        const y = clamp((event.clientY - rect.top) / zoom, 0, pages[drawing.pageIndex]?.height ?? 0);
+
+        if (drawing.tool === "rectangle") {
+          const startX = Math.min(drawing.startX, x);
+          const startY = Math.min(drawing.startY, y);
+
+          setDraftHighlight({
+            id: "draft",
+            kind: "rectangle",
+            pageIndex: drawing.pageIndex,
+            x: startX,
+            y: startY,
+            width: Math.abs(x - drawing.startX),
+            height: Math.abs(y - drawing.startY)
+          });
+          return;
+        }
+
+        if (drawing.tool === "line") {
+          setDraftHighlight({
+            id: "draft",
+            kind: "line",
+            pageIndex: drawing.pageIndex,
+            x: drawing.startX,
+            y: drawing.startY,
+            width: 0,
+            height: 0,
+            x2: x,
+            y2: y
+          });
+          return;
+        }
+
+        const dx = x - drawing.lastX;
+        const dy = y - drawing.lastY;
+        if (Math.hypot(dx, dy) >= 12) {
+          drawingRef.current = {
+            ...drawing,
+            lastX: x,
+            lastY: y
+          };
+          setHighlights((prev) => [
+            ...prev,
+            {
+              id: `hl-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`,
+              kind: "highlight",
+              pageIndex: drawing.pageIndex,
+              x: x - 7,
+              y: y - 6,
+              width: 14,
+              height: 12
+            }
+          ]);
+        }
+        return;
+      }
+
+      const drag = draggingCounterRef.current;
+      if (drag) {
+        const pageElement = pageRefs.current[drag.pageIndex];
+        const pageMetric = pages[drag.pageIndex];
+        if (!pageElement || !pageMetric) {
+          return;
+        }
+
+        const rect = pageElement.getBoundingClientRect();
+        const x = clamp((event.clientX - rect.left) / zoom - drag.offsetX, 0, pageMetric.width - 8);
+        const y = clamp((event.clientY - rect.top) / zoom - drag.offsetY, 0, pageMetric.height - 8);
+
+        setCounters((prev) =>
+          prev.map((counter) =>
+            counter.id === drag.counterId
+              ? {
+                  ...counter,
+                  x,
+                  y
+                }
+              : counter
+          )
+        );
+        return;
+      }
+
+      const pan = panningRef.current;
+      const viewer = viewerRef.current;
+      if (pan && viewer) {
+        viewer.scrollLeft = pan.startScrollLeft - (event.clientX - pan.startClientX);
+        viewer.scrollTop = pan.startScrollTop - (event.clientY - pan.startClientY);
+      }
     }
-    const payload = JSON.stringify({
-      patternText,
-      startingStitches,
-      rowIndex,
-      stitchIndex,
-      completedRows,
-      counters,
-      glossary
-    });
-    window.localStorage.setItem(STORAGE_KEY, payload);
-  }, [hasLoadedStorage, patternText, startingStitches, rowIndex, stitchIndex, completedRows, counters, glossary]);
+
+    function handlePointerUp() {
+      const drawing = drawingRef.current;
+      if (drawing?.tool === "rectangle" && draftHighlight && draftHighlight.width > 10 && draftHighlight.height > 10) {
+        setHighlights((prev) => [...prev, { ...draftHighlight, id: `hl-${Date.now()}`, kind: "rectangle" }]);
+      }
+
+      if (drawing?.tool === "line" && draftHighlight?.kind === "line") {
+        const lineLength = Math.hypot((draftHighlight.x2 ?? draftHighlight.x) - draftHighlight.x, (draftHighlight.y2 ?? draftHighlight.y) - draftHighlight.y);
+        if (lineLength > 8) {
+          setHighlights((prev) => [...prev, { ...draftHighlight, id: `hl-${Date.now()}`, kind: "line" }]);
+        }
+      }
+
+      drawingRef.current = null;
+      draggingCounterRef.current = null;
+      panningRef.current = null;
+      setDraftHighlight(null);
+    }
+
+    window.addEventListener("mousemove", handlePointerMove);
+    window.addEventListener("mouseup", handlePointerUp);
+
+    return () => {
+      window.removeEventListener("mousemove", handlePointerMove);
+      window.removeEventListener("mouseup", handlePointerUp);
+    };
+  }, [draftHighlight, pages, zoom]);
 
   useEffect(() => {
-    if (!rowToast) {
+    function onUndoHighlightHotkey(event: KeyboardEvent) {
+      const isUndo = (event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "z";
+      if (!isUndo) {
+        return;
+      }
+
+      if (!highlights.length) {
+        return;
+      }
+
+      event.preventDefault();
+      setHighlights((prev) => prev.slice(0, -1));
+    }
+
+    window.addEventListener("keydown", onUndoHighlightHotkey);
+    return () => {
+      window.removeEventListener("keydown", onUndoHighlightHotkey);
+    };
+  }, [highlights.length]);
+
+  function onSelectPdf(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    if (!file) {
       return;
     }
 
-    const timer = window.setTimeout(() => {
-      setRowToast("");
-    }, 1600);
+    void (async () => {
+      try {
+        const data = new Uint8Array(await file.arrayBuffer());
+        const loaded = await getDocument({ data }).promise;
 
-    return () => window.clearTimeout(timer);
-  }, [rowToast]);
+        const metrics: PageMetric[] = [];
+        for (let i = 1; i <= loaded.numPages; i += 1) {
+          const page = await loaded.getPage(i);
+          const viewport = page.getViewport({ scale: 1 });
+          metrics.push({
+            width: viewport.width,
+            height: viewport.height
+          });
+        }
 
-  useEffect(() => {
-    if (!selectedCell) {
-      return;
-    }
-    const row = parseResult.rows[selectedCell.row];
-    if (!row || selectedCell.stitch > row.totalStitches - 1) {
-      setSelectedCell(null);
-    }
-  }, [parseResult.rows, selectedCell]);
-
-  const currentStitch = currentRow?.expanded[Math.min(stitchIndex, Math.max(0, (currentRow?.expanded.length ?? 1) - 1))];
-
-  const timeline = useMemo(() => getTimeline(currentRow, stitchIndex), [currentRow, stitchIndex]);
-  const maxTimelineStitches = useMemo(
-    () => parseResult.rows.reduce((max, row) => Math.max(max, row.totalStitches), 0),
-    [parseResult.rows]
-  );
-
-  const filteredGlossary = glossary.filter((entry) => {
-    const q = glossarySearch.trim().toLowerCase();
-    if (!q) {
-      return true;
-    }
-    return (
-      entry.code.toLowerCase().includes(q) ||
-      entry.title.toLowerCase().includes(q) ||
-      entry.detail.toLowerCase().includes(q)
-    );
-  });
-
-  function pushHistoryState() {
-    setHistory((prev) => [{ rowIndex, stitchIndex, completedRows }, ...prev].slice(0, 200));
+        setPdfDoc(loaded);
+        setPages(metrics);
+        setPdfFileName(file.name);
+      } catch {}
+    })();
   }
 
-  function incrementPatternBy(step: number) {
-    if (!parseResult.rows.length || step < 1) {
+  function pageOverlayMouseDown(event: React.MouseEvent, pageIndex: number) {
+    if (event.button !== 0) {
       return;
     }
 
-    pushHistoryState();
+    const pageElement = pageRefs.current[pageIndex];
+    if (!pageElement) {
+      return;
+    }
 
-    let nextRowIndex = rowIndex;
-    let nextStitchIndex = stitchIndex;
-    let nextCompletedRows = completedRows;
+    if (mode === "highlight") {
+      const rect = pageElement.getBoundingClientRect();
+      const startX = clamp((event.clientX - rect.left) / zoom, 0, pages[pageIndex]?.width ?? 0);
+      const startY = clamp((event.clientY - rect.top) / zoom, 0, pages[pageIndex]?.height ?? 0);
 
-    for (let i = 0; i < step; i += 1) {
-      const row = parseResult.rows[nextRowIndex];
-      if (!row) {
+      if (drawTool === "highlight") {
+        setHighlights((prev) => [
+          ...prev,
+          {
+            id: `hl-${Date.now()}`,
+            kind: "highlight",
+            pageIndex,
+            x: startX - 7,
+            y: startY - 6,
+            width: 14,
+            height: 12
+          }
+        ]);
+      }
+
+      drawingRef.current = { tool: drawTool, pageIndex, startX, startY, lastX: startX, lastY: startY };
+      return;
+    }
+
+    const viewer = viewerRef.current;
+    if (!viewer) {
+      return;
+    }
+
+    panningRef.current = {
+      startClientX: event.clientX,
+      startClientY: event.clientY,
+      startScrollLeft: viewer.scrollLeft,
+      startScrollTop: viewer.scrollTop
+    };
+  }
+
+  function addCounter(type: CounterType) {
+    const viewer = viewerRef.current;
+    if (!viewer || pages.length === 0) {
+      return;
+    }
+
+    const viewerRect = viewer.getBoundingClientRect();
+    const centerY = viewer.scrollTop + viewerRect.height / 2;
+
+    let targetPage = 0;
+    let accumulatedHeight = 0;
+
+    for (let i = 0; i < pages.length; i += 1) {
+      const scaledHeight = pages[i].height * zoom + 18;
+      if (centerY <= accumulatedHeight + scaledHeight) {
+        targetPage = i;
         break;
       }
-
-      const atFinalRow = nextRowIndex === parseResult.rows.length - 1;
-      const atFinalStitch = nextStitchIndex >= row.totalStitches - 1;
-      if (atFinalRow && atFinalStitch) {
-        setRowToast("Pattern complete.");
-        break;
-      }
-
-      if (nextStitchIndex < row.totalStitches - 1) {
-        nextStitchIndex += 1;
-      } else {
-        nextCompletedRows += 1;
-        if (nextRowIndex < parseResult.rows.length - 1) {
-          nextRowIndex += 1;
-          nextStitchIndex = 0;
-          setRowToast(`${row.rowLabel} complete. Now on ${parseResult.rows[nextRowIndex].rowLabel}.`);
-        }
-      }
+      accumulatedHeight += scaledHeight;
+      targetPage = i;
     }
 
-    setRowIndex(nextRowIndex);
-    setStitchIndex(nextStitchIndex);
-    setCompletedRows(nextCompletedRows);
-    setAutoCenterPending(true);
-  }
-
-  function moveToNextRow() {
-    if (!parseResult.rows.length) {
-      return;
-    }
-
-    pushHistoryState();
-
-    if (rowIndex >= parseResult.rows.length - 1) {
-      setRowToast("Pattern complete.");
-      return;
-    }
-
-    const nextRow = rowIndex + 1;
-    setRowIndex(nextRow);
-    setStitchIndex(0);
-    setCompletedRows(nextRow);
-    setSelectedCell(null);
-    setAutoCenterPending(true);
-    setRowToast(`Moved to ${parseResult.rows[nextRow].rowLabel}.`);
-  }
-
-  function undoPatternStep() {
-    setHistory((prev) => {
-      const [latest, ...rest] = prev;
-      if (!latest) {
-        return prev;
-      }
-
-      setRowIndex(latest.rowIndex);
-      setStitchIndex(latest.stitchIndex);
-      setCompletedRows(latest.completedRows);
-      return rest;
-    });
-  }
-
-  const recenterTimeline = useCallback(() => {
-    const viewport = timelineViewportRef.current;
-    if (!viewport) {
-      return;
-    }
-
-    const selector = `[data-timeline-cell="r${rowIndex}-s${stitchIndex}"]`;
-    const cell = viewport.querySelector<HTMLElement>(selector);
-    if (!cell) {
-      return;
-    }
-
-    const viewportRect = viewport.getBoundingClientRect();
-    const cellRect = cell.getBoundingClientRect();
-
-    const targetLeft =
-      viewport.scrollLeft + (cellRect.left - viewportRect.left) - (viewport.clientWidth - cellRect.width) / 2;
-    const targetTop =
-      viewport.scrollTop + (cellRect.top - viewportRect.top) - (viewport.clientHeight - cellRect.height) / 2;
-
-    viewport.scrollTo({
-      left: Math.max(0, targetLeft),
-      top: Math.max(0, targetTop),
-      behavior: "smooth"
-    });
-  }, [rowIndex, stitchIndex]);
-
-  function moveToSelectedCell() {
-    if (!selectedCell) {
-      return;
-    }
-
-    pushHistoryState();
-    setRowIndex(selectedCell.row);
-    setStitchIndex(selectedCell.stitch);
-    setCompletedRows(selectedCell.row);
-    const target = parseResult.rows[selectedCell.row]?.expanded[selectedCell.stitch];
-    const targetLabel = target?.numbered ? `stitch ${target.ordinal}` : "unnumbered step";
-    setRowToast(`Moved to ${parseResult.rows[selectedCell.row]?.rowLabel}, ${targetLabel}.`);
-    setSelectedCell(null);
-  }
-
-  useEffect(() => {
-    if (hasCenteredInitialRef.current || !parseResult.rows.length) {
-      return;
-    }
-    hasCenteredInitialRef.current = true;
-    window.requestAnimationFrame(recenterTimeline);
-  }, [parseResult.rows.length, recenterTimeline]);
-
-  useEffect(() => {
-    if (!autoCenterPending) {
-      return;
-    }
-    window.requestAnimationFrame(() => {
-      recenterTimeline();
-      setAutoCenterPending(false);
-    });
-  }, [autoCenterPending, recenterTimeline]);
-
-  function incrementCounter(counterId: string, amount: number) {
-    let shouldAdvancePattern = false;
-
-    setCounters((prev) =>
-      prev.map((counter) => {
-        if (counter.id !== counterId) {
-          return counter;
-        }
-
-        if (counter.contributes && amount > 0) {
-          shouldAdvancePattern = true;
-        }
-
-        return { ...counter, value: Math.max(0, counter.value + amount) };
-      })
-    );
-
-    if (shouldAdvancePattern) {
-      incrementPatternBy(amount);
-    }
-  }
-
-  function addCounter() {
+    const page = pages[targetPage];
     setCounters((prev) => [
       ...prev,
       {
         id: `counter-${Date.now()}`,
-        name: `Counter ${prev.length + 1}`,
-        value: 0,
-        contributes: false
+        pageIndex: targetPage,
+        x: page.width * 0.34,
+        y: page.height * 0.22,
+        type,
+        label: formatCounterLabel(type),
+        value: 0
       }
     ]);
   }
 
-  function renameCounter(counterId: string, name: string) {
-    setCounters((prev) => prev.map((counter) => (counter.id === counterId ? { ...counter, name } : counter)));
-  }
-
-  async function pastePatternFromClipboard() {
-    try {
-      const text = await navigator.clipboard.readText();
-      if (!text.trim()) {
-        setRowToast("Clipboard is empty.");
-        return;
-      }
-      setPatternText(text);
-      setRowToast("Pattern pasted from clipboard.");
-    } catch {
-      setRowToast("Clipboard access unavailable. Paste manually.");
-    }
-  }
-
-  function importGlossaryFromPaste(event: FormEvent) {
-    event.preventDefault();
-    const { entries, errors } = parseGlossaryPaste(glossaryPaste);
-    setGlossaryPasteErrors(errors);
-    if (errors.length || !entries.length) {
+  function startDraggingCounter(event: React.MouseEvent, counter: KnitCounter) {
+    const target = event.target as HTMLElement;
+    if (target.closest("input, button, select, textarea, label")) {
       return;
     }
-    setGlossary(entries);
-    setGlossaryPaste("");
+
+    event.stopPropagation();
+
+    const pageElement = pageRefs.current[counter.pageIndex];
+    if (!pageElement) {
+      return;
+    }
+
+    const rect = pageElement.getBoundingClientRect();
+    draggingCounterRef.current = {
+      counterId: counter.id,
+      pageIndex: counter.pageIndex,
+      offsetX: (event.clientX - rect.left) / zoom - counter.x,
+      offsetY: (event.clientY - rect.top) / zoom - counter.y
+    };
   }
 
-  const currentOrdinal = currentStitch?.ordinal ?? 0;
-  const stitchProgress = currentRow ? `${currentOrdinal} / ${currentRow.numberedStitches}` : "-";
-  const remainingStitches = currentRow ? Math.max(0, currentRow.numberedStitches - currentOrdinal) : 0;
-  const hasPatternInput = patternText.trim().length > 0;
+  const visibleHighlights = useMemo(() => {
+    if (!draftHighlight) {
+      return highlights;
+    }
+    return [...highlights, draftHighlight];
+  }, [draftHighlight, highlights]);
+
+  function setCounterValue(counterId: string, nextValue: number) {
+    setCounters((prev) =>
+      prev.map((item) =>
+        item.id === counterId
+          ? {
+              ...item,
+              value: Math.max(0, nextValue)
+            }
+          : item
+      )
+    );
+  }
+
+  function applyCounterIncrement(counterId: string, amount: number) {
+    setCounters((prev) =>
+      prev.map((item) => {
+        if (item.id !== counterId) {
+          return item;
+        }
+
+        const nextValue = Math.max(0, item.value + amount);
+        if (nextValue === item.value) {
+          return item;
+        }
+
+        const stack = counterUndoHistoryRef.current[counterId] ?? [];
+        counterUndoHistoryRef.current[counterId] = [...stack, item.value];
+
+        return {
+          ...item,
+          value: nextValue
+        };
+      })
+    );
+  }
+
+  function undoCounter(counterId: string) {
+    const stack = counterUndoHistoryRef.current[counterId] ?? [];
+    if (!stack.length) {
+      return;
+    }
+
+    const previousValue = stack[stack.length - 1];
+    counterUndoHistoryRef.current[counterId] = stack.slice(0, -1);
+
+    setCounters((prev) =>
+      prev.map((item) =>
+        item.id === counterId
+          ? {
+              ...item,
+              value: previousValue
+            }
+          : item
+      )
+    );
+  }
+
+  function startCounterTitleEdit(counter: KnitCounter) {
+    setEditingCounterId(counter.id);
+    setEditingCounterTitle(counter.label);
+  }
+
+  function finishCounterTitleEdit(counterId: string) {
+    const nextTitle = editingCounterTitle.trim();
+    if (nextTitle) {
+      setCounters((prev) =>
+        prev.map((item) =>
+          item.id === counterId
+            ? {
+                ...item,
+                label: nextTitle
+              }
+            : item
+        )
+      );
+    }
+    setEditingCounterId(null);
+    setEditingCounterTitle("");
+  }
+
+  function undoLatestAnnotation() {
+    setHighlights((prev) => (prev.length ? prev.slice(0, -1) : prev));
+  }
 
   return (
-      <main className="app-shell">
-      <header className="toolbar card">
-        <div className="brand">
-          <p className="eyebrow">WhichStitch</p>
-          <h1>Pattern Map</h1>
-        </div>
-        <div className="toolbar-stats">
-          <span>{currentRow ? currentRow.rowLabel : "No row"}</span>
-          <span>{stitchProgress}</span>
-          <span>{currentRow ? `${currentRow.startCount} -> ${currentRow.endCount} sts` : `${startingStitches} sts`}</span>
-        </div>
-        <div className="toolbar-actions">
-          <div className="toolbar-popover-anchor">
-            <button
-              type="button"
-              className="ghost"
-              onClick={() => {
-                setShowPatternPanel((prev) => {
-                  const next = !prev;
-                  if (next) {
-                    setShowGlossaryPanel(false);
-                  }
-                  return next;
-                });
-              }}
-            >
-              {showPatternPanel ? "Hide Pattern" : "Pattern"}
-            </button>
-            {showPatternPanel ? (
-              <section className="card utility-panel toolbar-popover toolbar-popover-pattern">
-                <div className="section-heading">
-                  <h2>Pattern Input</h2>
-                  <button type="button" className="ghost" onClick={pastePatternFromClipboard}>
-                    Paste
-                  </button>
-                </div>
-                <p className="muted">`RndN: ...` or `RowN: ...` per line</p>
-                <div className="start-row">
-                  <label htmlFor="starting-stitches" className="muted">
-                    Starting stitches
-                  </label>
-                  <input
-                    id="starting-stitches"
-                    type="number"
-                    min={1}
-                    value={startingStitches}
-                    onChange={(event) => setStartingStitches(Math.max(1, Number(event.target.value) || 1))}
-                  />
-                </div>
-                <textarea
-                  value={patternText}
-                  onChange={(event) => setPatternText(event.target.value)}
-                  className="pattern-input"
-                  rows={12}
-                  spellCheck={false}
-                />
-                {parseResult.errors.length ? (
-                  <ul className="errors">
-                    {parseResult.errors.map((error) => (
-                      <li key={error}>{error}</li>
-                    ))}
-                  </ul>
-                ) : (
-                  <p className="muted">{parseResult.rows.length} row(s) parsed successfully.</p>
-                )}
-                {parseResult.warnings.length ? (
-                  <ul className="warnings">
-                    {parseResult.warnings.map((warning) => (
-                      <li key={warning}>{warning}</li>
-                    ))}
-                  </ul>
-                ) : null}
-              </section>
-            ) : null}
-          </div>
-
-          <div className="toolbar-popover-anchor">
-            <button
-              type="button"
-              className="ghost"
-              onClick={() => {
-                setShowGlossaryPanel((prev) => {
-                  const next = !prev;
-                  if (next) {
-                    setShowPatternPanel(false);
-                  }
-                  return next;
-                });
-              }}
-            >
-              {showGlossaryPanel ? "Hide Glossary" : "Glossary"}
-            </button>
-            {showGlossaryPanel ? (
-              <section className="card utility-panel toolbar-popover toolbar-popover-glossary">
-                <div className="section-heading">
-                  <h2>Stitch Glossary</h2>
-                  <span className="muted">{filteredGlossary.length} entries</span>
-                </div>
-                {!glossary.length ? (
-                  <form className="glossary-form" onSubmit={importGlossaryFromPaste}>
-                    <p className="muted">
-                      Paste glossary rows as `ABBREV[TAB]Meaning`, one per line.
-                    </p>
-                    <textarea
-                      value={glossaryPaste}
-                      onChange={(event) => setGlossaryPaste(event.target.value)}
-                      placeholder={"BOR\tBeginning of round\nCO\tCast on\n..."}
-                      rows={10}
-                      aria-label="Paste glossary entries"
-                    />
-                    <button type="submit" className="primary">
-                      Parse Glossary Paste
-                    </button>
-                    {glossaryPasteErrors.length ? (
-                      <ul className="errors">
-                        {glossaryPasteErrors.map((error) => (
-                          <li key={error}>{error}</li>
-                        ))}
-                      </ul>
-                    ) : null}
-                  </form>
-                ) : (
-                  <>
-                    <input
-                      value={glossarySearch}
-                      onChange={(event) => setGlossarySearch(event.target.value)}
-                      placeholder="Search by code or meaning"
-                      aria-label="Search glossary"
-                    />
-                    <ul className="glossary-list">
-                      {filteredGlossary.map((entry) => (
-                        <li key={entry.code}>
-                          <p className="glossary-code">{entry.code}</p>
-                          <span>{entry.detail}</span>
-                        </li>
-                      ))}
-                    </ul>
-                  </>
-                )}
-              </section>
-            ) : null}
-          </div>
-
-          <button type="button" className="primary" onClick={addCounter}>
-            New Counter
+    <main className="pdf-app">
+      <header className="pdf-toolbar">
+        <div className="toolbar-left">
+          <label className="toolbar-btn file-btn">
+            Open PDF
+            <input type="file" accept="application/pdf" onChange={onSelectPdf} />
+          </label>
+          <button
+            type="button"
+            className={mode === "pan" ? "toolbar-btn active" : "toolbar-btn"}
+            onClick={() => setMode("pan")}
+          >
+            Pan
+          </button>
+          <button type="button" className={mode === "highlight" ? "toolbar-btn active" : "toolbar-btn"} onClick={() => setMode("highlight")}>
+            Annotate
+          </button>
+          <button type="button" className="toolbar-btn" onClick={() => addCounter("row")}>
+            Add Row Counter
+          </button>
+          <button type="button" className="toolbar-btn" onClick={() => addCounter("stitch")}>
+            Add Stitch Counter
           </button>
         </div>
+
+        <div className="toolbar-right">
+          <span className="status-chip">{pdfFileName}</span>
+          <label className="zoom-wrap">
+            Zoom
+            <input
+              type="range"
+              min={MIN_ZOOM}
+              max={MAX_ZOOM}
+              step={0.05}
+              value={zoom}
+              onChange={(event) => setZoom(Number(event.target.value))}
+            />
+            <span>{Math.round(zoom * 100)}%</span>
+          </label>
+        </div>
       </header>
-
-      <section className="timeline-stage card">
-        <div className="timeline-header">
-          <h2>Stitch Timeline</h2>
-          <span className="muted">Scroll any direction, tap any stitch to jump</span>
+      {mode === "highlight" ? (
+        <div className="highlight-subbar">
+          <button
+            type="button"
+            className={drawTool === "rectangle" ? "toolbar-btn active" : "toolbar-btn"}
+            onClick={() => setDrawTool("rectangle")}
+          >
+            Draw Rectangle
+          </button>
+          <button
+            type="button"
+            className={drawTool === "line" ? "toolbar-btn active" : "toolbar-btn"}
+            onClick={() => setDrawTool("line")}
+          >
+            Draw Line
+          </button>
+          <button
+            type="button"
+            className={drawTool === "highlight" ? "toolbar-btn active" : "toolbar-btn"}
+            onClick={() => setDrawTool("highlight")}
+          >
+            Draw Highlight
+          </button>
+          <button
+            type="button"
+            className="toolbar-btn"
+            onClick={undoLatestAnnotation}
+            disabled={!highlights.length}
+          >
+            Undo
+          </button>
         </div>
-        {!hasPatternInput ? (
-          <p className="muted">
-            Paste your pattern to begin. Use the `Pattern` button above to open the input panel.
-          </p>
-        ) : null}
-        {hasPatternInput && !timeline.length ? (
-          <p className="muted">Timeline appears once the pattern parses successfully.</p>
-        ) : null}
-
-        <div className="timeline-body">
-          <aside className="floating-panel">
-            <p className="eyebrow">Current</p>
-            <p className="panel-stitch">{currentStitch ? currentStitch.code : "--"}</p>
-            <p className="panel-note">{currentStitch ? currentStitch.label : "Load pattern"}</p>
-            <div className="panel-mini">
-              <span>{currentRow ? currentRow.rowLabel : "-"}</span>
-              <span>{stitchProgress}</span>
-              <span>{remainingStitches} left</span>
-            </div>
-            {rowToast ? <p className="toast small">{rowToast}</p> : null}
-            <div className="panel-actions">
-              <button type="button" className="primary" onClick={() => incrementPatternBy(1)}>
-                +1
-              </button>
-              <button type="button" className="ghost" onClick={() => incrementPatternBy(5)}>
-                +5
-              </button>
-              <button type="button" className="ghost" onClick={() => incrementPatternBy(10)}>
-                +10
-              </button>
-              <button type="button" className="ghost" onClick={moveToNextRow}>
-                Next Row
-              </button>
-              <button type="button" className="ghost" onClick={undoPatternStep}>
-                Undo
-              </button>
-              <button type="button" className="ghost" onClick={recenterTimeline}>
-                Recenter
-              </button>
-            </div>
-          </aside>
-
-          <div className="timeline-viewport" aria-live="polite" ref={timelineViewportRef}>
-            <div
-              className="timeline-grid"
-              style={{
-                gridTemplateColumns: `7.2rem repeat(${Math.max(maxTimelineStitches, 1)}, minmax(4.1rem, 4.1rem))`
-              }}
-            >
-              <div className="timeline-header-cell corner">Row</div>
-              {Array.from({ length: maxTimelineStitches }, (_, index) => (
-                <div key={`col-${index + 1}`} className="timeline-header-cell">
-                  {index + 1}
-                </div>
-              ))}
-
-              {parseResult.rows.map((row, rowIdx) => (
-                <Fragment key={row.id}>
-                  <div className={rowIdx === rowIndex ? "timeline-row-label active" : "timeline-row-label"}>
-                    {row.rowLabel}
-                  </div>
-                  {Array.from({ length: maxTimelineStitches }, (_, stitchIdx) => {
-                    if (stitchIdx > row.totalStitches - 1) {
-                      return <div key={`${row.id}-empty-${stitchIdx}`} className="timeline-cell-wrap empty" />;
-                    }
-
-                    const step = row.expanded[stitchIdx];
-                    const isActive = rowIdx === rowIndex && stitchIdx === stitchIndex;
-                    const isSelected = selectedCell?.row === rowIdx && selectedCell?.stitch === stitchIdx;
-                    const cellClass = isActive
-                      ? "timeline-cell active"
-                      : isSelected
-                        ? "timeline-cell selected"
-                        : "timeline-cell";
-
-                    return (
-                      <div
-                        key={`${row.id}-${stitchIdx}`}
-                        className="timeline-cell-wrap"
-                        data-timeline-cell={`r${rowIdx}-s${stitchIdx}`}
-                      >
-                        <button
-                          type="button"
-                          className={cellClass}
-                          onClick={() => setSelectedCell({ row: rowIdx, stitch: stitchIdx })}
-                        >
-                          <span className="cell-index">{step.numbered ? step.ordinal : ""}</span>
-                          <span className="cell-code">{step.code}</span>
-                        </button>
-                        {isSelected ? (
-                          <div className="cell-popover">
-                            <button type="button" className="primary" onClick={moveToSelectedCell}>
-                              Move Here
-                            </button>
-                          </div>
-                        ) : null}
-                      </div>
-                    );
-                  })}
-                </Fragment>
-              ))}
-            </div>
-          </div>
-        </div>
-      </section>
-
-      {counters.length ? (
-        <section className="counter-dock card">
-          <div className="section-heading">
-            <h2>Counters</h2>
-            <span className="muted">{counters.length} active</span>
-          </div>
-          <ul className="counter-list compact">
-            {counters.map((counter) => (
-              <li key={counter.id} className="counter-item compact">
-                <input
-                  value={counter.name}
-                  onChange={(event) => renameCounter(counter.id, event.target.value)}
-                  aria-label={`Rename ${counter.name}`}
-                />
-                <label className="toggle">
-                  <input
-                    type="checkbox"
-                    checked={counter.contributes}
-                    onChange={(event) =>
-                      setCounters((prev) =>
-                        prev.map((item) => (item.id === counter.id ? { ...item, contributes: event.target.checked } : item))
-                      )
-                    }
-                  />
-                  Include
-                </label>
-                <div className="counter-controls">
-                  <button type="button" className="ghost" onClick={() => incrementCounter(counter.id, -1)}>
-                    -1
-                  </button>
-                  <strong>{counter.value}</strong>
-                  <button type="button" className="ghost" onClick={() => incrementCounter(counter.id, 1)}>
-                    +1
-                  </button>
-                </div>
-              </li>
-            ))}
-          </ul>
-        </section>
       ) : null}
 
-      </main>
+      <section className={mode === "pan" ? "pdf-viewer pan-mode" : "pdf-viewer highlight-tools-open"} ref={viewerRef}>
+        {!pdfDoc ? <div className="empty-state">Load a PDF to start marking your knitting pattern.</div> : null}
+
+        {pages.map((page, pageIndex) => (
+          <article
+            key={`page-${pageIndex}`}
+            className="pdf-page"
+            style={{ width: page.width * zoom, height: page.height * zoom }}
+            ref={(node) => {
+              pageRefs.current[pageIndex] = node;
+            }}
+          >
+            <canvas
+              ref={(node) => {
+                canvasRefs.current[pageIndex] = node;
+              }}
+              className="pdf-canvas"
+            />
+
+            <div className="overlay-layer" onMouseDown={(event) => pageOverlayMouseDown(event, pageIndex)}>
+              {visibleHighlights
+                .filter((item) => item.pageIndex === pageIndex)
+                .map((item) => (
+                  item.kind === "line" ? (
+                    <div
+                      key={item.id}
+                      className="highlight-line"
+                      style={{
+                        left: item.x * zoom,
+                        top: item.y * zoom,
+                        width: Math.hypot(((item.x2 ?? item.x) - item.x) * zoom, ((item.y2 ?? item.y) - item.y) * zoom),
+                        transform: `rotate(${Math.atan2((item.y2 ?? item.y) - item.y, (item.x2 ?? item.x) - item.x)}rad)`
+                      }}
+                    />
+                  ) : (
+                    <div
+                      key={item.id}
+                      className={item.kind === "highlight" ? "highlight-marker" : "highlight-box"}
+                      style={{
+                        left: item.x * zoom,
+                        top: item.y * zoom,
+                        width: item.width * zoom,
+                        height: item.height * zoom
+                      }}
+                    />
+                  )
+                ))}
+
+              {counters
+                .filter((counter) => counter.pageIndex === pageIndex)
+                .map((counter) => (
+                  <div
+                    key={counter.id}
+                    className={`knit-counter ${counter.type}`}
+                    style={{ left: counter.x * zoom, top: counter.y * zoom }}
+                    onMouseDown={(event) => startDraggingCounter(event, counter)}
+                  >
+                    <div className="counter-top">
+                      {editingCounterId === counter.id ? (
+                        <input
+                          value={editingCounterTitle}
+                          onChange={(event) => setEditingCounterTitle(event.target.value)}
+                          onBlur={() => finishCounterTitleEdit(counter.id)}
+                          onKeyDown={(event) => {
+                            if (event.key === "Enter") {
+                              finishCounterTitleEdit(counter.id);
+                            }
+                            if (event.key === "Escape") {
+                              setEditingCounterId(null);
+                              setEditingCounterTitle("");
+                            }
+                          }}
+                          className="counter-title-input"
+                          autoFocus
+                        />
+                      ) : (
+                        <button
+                          type="button"
+                          className="counter-kind"
+                          onClick={() => startCounterTitleEdit(counter)}
+                          aria-label={`Edit ${counter.label} title`}
+                        >
+                          {counter.label}
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        className="counter-close"
+                        onClick={() => {
+                          setCounters((prev) => prev.filter((item) => item.id !== counter.id));
+                          delete counterUndoHistoryRef.current[counter.id];
+                        }}
+                        aria-label={`Remove ${counter.label} counter`}
+                      >
+                        x
+                      </button>
+                    </div>
+                    <input
+                      type="number"
+                      inputMode="numeric"
+                      pattern="[0-9]*"
+                      min={0}
+                      value={counter.value}
+                      onChange={(event) => setCounterValue(counter.id, Number(event.target.value) || 0)}
+                      className="counter-value-input"
+                      aria-label={`${counter.label} value`}
+                    />
+                    <div className="counter-buttons">
+                      <button
+                        type="button"
+                        onClick={() => undoCounter(counter.id)}
+                      >
+                        Undo
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => applyCounterIncrement(counter.id, 1)}
+                      >
+                        +1
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => applyCounterIncrement(counter.id, 5)}
+                      >
+                        +5
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => applyCounterIncrement(counter.id, 10)}
+                      >
+                        +10
+                      </button>
+                    </div>
+                  </div>
+                ))}
+            </div>
+          </article>
+        ))}
+      </section>
+    </main>
   );
 }
