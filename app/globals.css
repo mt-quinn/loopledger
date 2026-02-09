@@ -54,6 +54,10 @@
   background: #7bb5e8;
 }
 
+[data-theme="dark"] .annotate-scrollbar {
+  accent-color: #7bb5e8;
+}
+
 * {
   box-sizing: border-box;
 }
@@ -109,6 +113,25 @@ body {
   border-radius: 10px;
   background: var(--panel);
   backdrop-filter: blur(3px);
+}
+
+.annotate-scrollbar-wrap {
+  position: fixed;
+  right: 0.35rem;
+  top: 8rem;
+  bottom: 1rem;
+  z-index: 21;
+  display: flex;
+  align-items: center;
+  pointer-events: none;
+}
+
+.annotate-scrollbar {
+  pointer-events: auto;
+  -webkit-appearance: slider-vertical;
+  width: 1.15rem;
+  height: min(70vh, 38rem);
+  accent-color: #2d7f56;
 }
 
 .color-picker-wrap {
@@ -688,6 +711,12 @@ body {
     left: 0.45rem;
     right: 0.45rem;
     overflow-x: auto;
+  }
+
+  .annotate-scrollbar-wrap {
+    right: 0.2rem;
+    top: 9rem;
+    bottom: 0.8rem;
   }
 
   .zoom-wrap input {

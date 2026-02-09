@@ -258,6 +258,8 @@ export default function HomePage() {
   const [connectTargetCounterId, setConnectTargetCounterId] = useState<string | null>(null);
   const [draftFreeDraw, setDraftFreeDraw] = useState<Annotation | null>(null);
   const [editingTextAnnotationId, setEditingTextAnnotationId] = useState<string | null>(null);
+  const [annotateScrollMax, setAnnotateScrollMax] = useState(0);
+  const [annotateScrollValue, setAnnotateScrollValue] = useState(0);
   const connectDragRef = useRef<{
     fromCounterId: string;
     pageIndex: number;
@@ -265,6 +267,16 @@ export default function HomePage() {
     startY: number;
   } | null>(null);
   const freeDrawPointsRef = useRef<Array<{ x: number; y: number }>>([]);
+  const isPinchGestureRef = useRef(false);
+
+  const cancelInProgressAnnotation = useCallback(() => {
+    drawingRef.current = null;
+    setDraftHighlight(null);
+    setDraftReferenceRect(null);
+    setDraftFreeDraw(null);
+    freeDrawPointsRef.current = [];
+    setEditingTextAnnotationId(null);
+  }, []);
 
   useEffect(() => {
     GlobalWorkerOptions.workerSrc = "https://unpkg.com/pdfjs-dist@4.10.38/build/pdf.worker.min.mjs";
@@ -455,12 +467,13 @@ export default function HomePage() {
 
   useEffect(() => {
     function handlePointerMove(event: PointerEvent) {
+      if (isPinchGestureRef.current) {
+        return;
+      }
       const drawing = drawingRef.current;
       if (drawing) {
         if (mode !== "highlight" && !isSelectingReference) {
-          drawingRef.current = null;
-          setDraftHighlight(null);
-          setDraftReferenceRect(null);
+          cancelInProgressAnnotation();
           return;
         }
         event.preventDefault();
@@ -606,11 +619,12 @@ export default function HomePage() {
     }
 
     function handlePointerUp(event: PointerEvent) {
+      if (isPinchGestureRef.current) {
+        return;
+      }
       const drawing = drawingRef.current;
       if (drawing && mode !== "highlight" && !isSelectingReference) {
-        drawingRef.current = null;
-        setDraftHighlight(null);
-        setDraftReferenceRect(null);
+        cancelInProgressAnnotation();
         draggingCounterRef.current = null;
         panningRef.current = null;
         return;
@@ -667,10 +681,7 @@ export default function HomePage() {
       drawingRef.current = null;
       draggingCounterRef.current = null;
       panningRef.current = null;
-      setDraftHighlight(null);
-      setDraftReferenceRect(null);
-      setDraftFreeDraw(null);
-      freeDrawPointsRef.current = [];
+      cancelInProgressAnnotation();
 
       const connecting = connectDragRef.current;
       if (connecting) {
@@ -706,22 +717,18 @@ export default function HomePage() {
       window.removeEventListener("pointermove", handlePointerMove);
       window.removeEventListener("pointerup", handlePointerUp);
     };
-  }, [activePdfId, captureReferenceImage, counters, draftFreeDraw, draftHighlight, draftReferenceRect, isSelectingReference, mode, pages, strokeColor, zoom]);
+  }, [activePdfId, cancelInProgressAnnotation, captureReferenceImage, counters, draftFreeDraw, draftHighlight, draftReferenceRect, isSelectingReference, mode, pages, strokeColor, zoom]);
 
   useEffect(() => {
     if (mode === "highlight" || isSelectingReference) {
       return;
     }
-    drawingRef.current = null;
-    setDraftHighlight(null);
-    setDraftReferenceRect(null);
-    setDraftFreeDraw(null);
-    freeDrawPointsRef.current = [];
+    cancelInProgressAnnotation();
     connectDragRef.current = null;
     setDraftConnection(null);
     setConnectingFromCounterId(null);
     setConnectTargetCounterId(null);
-  }, [isSelectingReference, mode]);
+  }, [cancelInProgressAnnotation, isSelectingReference, mode]);
 
   useEffect(() => {
     if (!activePdfId) {
@@ -729,6 +736,31 @@ export default function HomePage() {
     }
     setReferenceCapture(referencesByPdf[activePdfId] ?? null);
   }, [activePdfId, referencesByPdf]);
+
+  useEffect(() => {
+    if (mode !== "highlight") {
+      return;
+    }
+
+    const viewer = viewerRef.current;
+    if (!viewer) {
+      return;
+    }
+
+    const sync = () => {
+      const max = Math.max(0, viewer.scrollHeight - viewer.clientHeight);
+      setAnnotateScrollMax(max);
+      setAnnotateScrollValue(viewer.scrollTop);
+    };
+
+    sync();
+    viewer.addEventListener("scroll", sync, { passive: true });
+    window.addEventListener("resize", sync);
+    return () => {
+      viewer.removeEventListener("scroll", sync);
+      window.removeEventListener("resize", sync);
+    };
+  }, [mode, zoom, pages.length]);
 
   useEffect(() => {
     const ids = new Set(counters.map((counter) => counter.id));
@@ -793,6 +825,10 @@ export default function HomePage() {
 
   function pageOverlayPointerDown(event: React.PointerEvent, pageIndex: number) {
     if (event.button !== 0) {
+      return;
+    }
+
+    if (event.pointerType === "touch" && (isPinchGestureRef.current || touchPointsRef.current.size >= 1)) {
       return;
     }
 
@@ -1192,7 +1228,7 @@ export default function HomePage() {
   }
 
   function handleViewerPointerDown(event: React.PointerEvent<HTMLDivElement>) {
-    if (mode !== "pan" || isSelectingReference || event.pointerType !== "touch") {
+    if ((mode !== "pan" && mode !== "highlight") || isSelectingReference || event.pointerType !== "touch") {
       return;
     }
 
@@ -1200,6 +1236,8 @@ export default function HomePage() {
     if (touchPointsRef.current.size !== 2) {
       return;
     }
+    isPinchGestureRef.current = true;
+    cancelInProgressAnnotation();
 
     const viewer = viewerRef.current;
     if (!viewer) {
@@ -1232,7 +1270,7 @@ export default function HomePage() {
   }
 
   function handleViewerPointerMove(event: React.PointerEvent<HTMLDivElement>) {
-    if (mode !== "pan" || isSelectingReference || event.pointerType !== "touch") {
+    if ((mode !== "pan" && mode !== "highlight") || isSelectingReference || event.pointerType !== "touch") {
       return;
     }
 
@@ -1305,6 +1343,7 @@ export default function HomePage() {
         viewer.scrollTop = pinch.anchorContentY * pinch.lastZoom - (pinch.midpointClientY - rect.top);
       }
       pinchStateRef.current = null;
+      isPinchGestureRef.current = false;
     }
   }
 
@@ -1464,6 +1503,25 @@ export default function HomePage() {
           >
             Undo
           </button>
+        </div>
+      ) : null}
+      {mode === "highlight" ? (
+        <div className="annotate-scrollbar-wrap" aria-label="Annotate mode scroll">
+          <input
+            type="range"
+            className="annotate-scrollbar"
+            min={0}
+            max={Math.max(0, Math.round(annotateScrollMax))}
+            value={Math.min(Math.round(annotateScrollValue), Math.max(0, Math.round(annotateScrollMax)))}
+            onChange={(event) => {
+              const viewer = viewerRef.current;
+              if (!viewer) {
+                return;
+              }
+              viewer.scrollTop = Number(event.target.value);
+              setAnnotateScrollValue(Number(event.target.value));
+            }}
+          />
         </div>
       ) : null}
 
