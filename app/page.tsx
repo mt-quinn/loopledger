@@ -4,7 +4,7 @@ import { ChangeEvent, useCallback, useEffect, useMemo, useRef, useState } from "
 import { GlobalWorkerOptions, getDocument, PDFDocumentProxy } from "pdfjs-dist/legacy/build/pdf.mjs";
 
 type ViewerMode = "pan" | "highlight";
-type DrawTool = "rectangle" | "line" | "highlight";
+type DrawTool = "rectangle" | "line" | "highlight" | "freeDraw" | "text";
 type DrawingTool = DrawTool | "reference";
 type CounterType = "row" | "stitch";
 
@@ -24,6 +24,9 @@ type Annotation = {
   color?: string;
   x2?: number;
   y2?: number;
+  points?: Array<{ x: number; y: number }>;
+  text?: string;
+  fontSize?: number;
 };
 
 type KnitCounter = {
@@ -253,12 +256,15 @@ export default function HomePage() {
   } | null>(null);
   const [connectingFromCounterId, setConnectingFromCounterId] = useState<string | null>(null);
   const [connectTargetCounterId, setConnectTargetCounterId] = useState<string | null>(null);
+  const [draftFreeDraw, setDraftFreeDraw] = useState<Annotation | null>(null);
+  const [editingTextAnnotationId, setEditingTextAnnotationId] = useState<string | null>(null);
   const connectDragRef = useRef<{
     fromCounterId: string;
     pageIndex: number;
     startX: number;
     startY: number;
   } | null>(null);
+  const freeDrawPointsRef = useRef<Array<{ x: number; y: number }>>([]);
 
   useEffect(() => {
     GlobalWorkerOptions.workerSrc = "https://unpkg.com/pdfjs-dist@4.10.38/build/pdf.worker.min.mjs";
@@ -510,6 +516,27 @@ export default function HomePage() {
             y2: y,
             color: strokeColor
           });
+          return;
+        }
+
+        if (drawing.tool === "freeDraw") {
+          const points = freeDrawPointsRef.current;
+          const last = points[points.length - 1];
+          if (!last || Math.hypot(x - last.x, y - last.y) > 1.8) {
+            const nextPoints = [...points, { x, y }];
+            freeDrawPointsRef.current = nextPoints;
+            setDraftFreeDraw({
+              id: "draft-free",
+              kind: "freeDraw",
+              pageIndex: drawing.pageIndex,
+              x: 0,
+              y: 0,
+              width: 0,
+              height: 0,
+              points: nextPoints,
+              color: strokeColor
+            });
+          }
         }
         return;
       }
@@ -633,11 +660,17 @@ export default function HomePage() {
         }
       }
 
+      if (drawing?.tool === "freeDraw" && draftFreeDraw?.points && draftFreeDraw.points.length > 1) {
+        setHighlights((prev) => [...prev, { ...draftFreeDraw, id: `hl-${Date.now()}`, kind: "freeDraw" }]);
+      }
+
       drawingRef.current = null;
       draggingCounterRef.current = null;
       panningRef.current = null;
       setDraftHighlight(null);
       setDraftReferenceRect(null);
+      setDraftFreeDraw(null);
+      freeDrawPointsRef.current = [];
 
       const connecting = connectDragRef.current;
       if (connecting) {
@@ -673,7 +706,7 @@ export default function HomePage() {
       window.removeEventListener("pointermove", handlePointerMove);
       window.removeEventListener("pointerup", handlePointerUp);
     };
-  }, [activePdfId, captureReferenceImage, counters, draftHighlight, draftReferenceRect, isSelectingReference, mode, pages, strokeColor, zoom]);
+  }, [activePdfId, captureReferenceImage, counters, draftFreeDraw, draftHighlight, draftReferenceRect, isSelectingReference, mode, pages, strokeColor, zoom]);
 
   useEffect(() => {
     if (mode === "highlight" || isSelectingReference) {
@@ -682,6 +715,8 @@ export default function HomePage() {
     drawingRef.current = null;
     setDraftHighlight(null);
     setDraftReferenceRect(null);
+    setDraftFreeDraw(null);
+    freeDrawPointsRef.current = [];
     connectDragRef.current = null;
     setDraftConnection(null);
     setConnectingFromCounterId(null);
@@ -780,6 +815,44 @@ export default function HomePage() {
       const rect = pageElement.getBoundingClientRect();
       const startX = clamp((event.clientX - rect.left) / zoom, 0, pages[pageIndex]?.width ?? 0);
       const startY = clamp((event.clientY - rect.top) / zoom, 0, pages[pageIndex]?.height ?? 0);
+
+      if (drawTool === "text") {
+        const id = `hl-${Date.now()}`;
+        setHighlights((prev) => [
+          ...prev,
+          {
+            id,
+            kind: "text",
+            pageIndex,
+            x: startX,
+            y: startY,
+            width: 0,
+            height: 0,
+            text: "",
+            color: strokeColor,
+            fontSize: 22
+          }
+        ]);
+        setEditingTextAnnotationId(id);
+        return;
+      }
+
+      if (drawTool === "freeDraw") {
+        freeDrawPointsRef.current = [{ x: startX, y: startY }];
+        drawingRef.current = { tool: "freeDraw", pageIndex, startX, startY };
+        setDraftFreeDraw({
+          id: "draft-free",
+          kind: "freeDraw",
+          pageIndex,
+          x: 0,
+          y: 0,
+          width: 0,
+          height: 0,
+          points: [{ x: startX, y: startY }],
+          color: strokeColor
+        });
+        return;
+      }
 
       drawingRef.current = { tool: drawTool, pageIndex, startX, startY };
       return;
@@ -949,11 +1022,22 @@ export default function HomePage() {
   }
 
   const visibleHighlights = useMemo(() => {
-    if (!draftHighlight) {
-      return highlights;
+    const next = [...highlights];
+    if (draftHighlight) {
+      next.push(draftHighlight);
     }
-    return [...highlights, draftHighlight];
-  }, [draftHighlight, highlights]);
+    if (draftFreeDraw) {
+      next.push(draftFreeDraw);
+    }
+    return next;
+  }, [draftFreeDraw, draftHighlight, highlights]);
+
+  function toSvgPath(points: Array<{ x: number; y: number }> | undefined, scale: number): string {
+    if (!points || points.length < 2) {
+      return "";
+    }
+    return points.map((point, index) => `${index === 0 ? "M" : "L"} ${point.x * scale} ${point.y * scale}`).join(" ");
+  }
 
   const counterById = useMemo(() => {
     const map = new Map<string, KnitCounter>();
@@ -991,6 +1075,19 @@ export default function HomePage() {
           ? {
               ...item,
               value: target
+            }
+          : item
+      )
+    );
+  }
+
+  function updateTextAnnotation(id: string, text: string) {
+    setHighlights((prev) =>
+      prev.map((item) =>
+        item.id === id
+          ? {
+              ...item,
+              text
             }
           : item
       )
@@ -1330,6 +1427,20 @@ export default function HomePage() {
           >
             Draw Highlight
           </button>
+          <button
+            type="button"
+            className={drawTool === "freeDraw" ? "toolbar-btn active" : "toolbar-btn"}
+            onClick={() => setDrawTool("freeDraw")}
+          >
+            Free Draw
+          </button>
+          <button
+            type="button"
+            className={drawTool === "text" ? "toolbar-btn active" : "toolbar-btn"}
+            onClick={() => setDrawTool("text")}
+          >
+            Add Text
+          </button>
           <div className="color-picker-wrap" role="group" aria-label="Annotation stroke color">
             <span>Stroke</span>
             <div className="stroke-palette">
@@ -1444,6 +1555,19 @@ export default function HomePage() {
                 />
               ) : null}
 
+              <svg className="annotation-layer" viewBox={`0 0 ${page.width * zoom} ${page.height * zoom}`} preserveAspectRatio="none">
+                {visibleHighlights
+                  .filter((item) => item.pageIndex === pageIndex && item.kind === "freeDraw")
+                  .map((item) => (
+                    <path
+                      key={item.id}
+                      d={toSvgPath(item.points, zoom)}
+                      className="free-draw-path"
+                      style={{ stroke: item.color ?? strokeColor }}
+                    />
+                  ))}
+              </svg>
+
               {visibleHighlights
                 .filter((item) => item.pageIndex === pageIndex)
                 .map((item) => (
@@ -1459,7 +1583,43 @@ export default function HomePage() {
                         transform: `rotate(${Math.atan2((item.y2 ?? item.y) - item.y, (item.x2 ?? item.x) - item.x)}rad)`
                       }}
                     />
-                  ) : (
+                  ) : item.kind === "text" ? (
+                    <div
+                      key={item.id}
+                      className="text-annotation"
+                      style={{
+                        left: item.x * zoom,
+                        top: item.y * zoom,
+                        color: item.color ?? strokeColor,
+                        fontSize: `${(item.fontSize ?? 22) * zoom}px`
+                      }}
+                      onPointerDown={(event) => event.stopPropagation()}
+                    >
+                      {editingTextAnnotationId === item.id ? (
+                        <textarea
+                          value={item.text ?? ""}
+                          className="text-annotation-input"
+                          autoFocus
+                          rows={1}
+                          onChange={(event) => updateTextAnnotation(item.id, event.target.value)}
+                          onBlur={() => setEditingTextAnnotationId(null)}
+                          onKeyDown={(event) => {
+                            if (event.key === "Escape") {
+                              setEditingTextAnnotationId(null);
+                            }
+                          }}
+                        />
+                      ) : (
+                        <button
+                          type="button"
+                          className="text-annotation-label"
+                          onClick={() => setEditingTextAnnotationId(item.id)}
+                        >
+                          {(item.text && item.text.length > 0) ? item.text : "Type..."}
+                        </button>
+                      )}
+                    </div>
+                  ) : item.kind === "freeDraw" ? null : (
                     <div
                       key={item.id}
                       className={item.kind === "highlight" ? "highlight-marker" : "highlight-box"}
