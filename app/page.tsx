@@ -41,7 +41,7 @@ type PersistedState = {
   highlights: Annotation[];
   counters: KnitCounter[];
   strokeColor?: string;
-  referenceCapture?: ReferenceCapture | null;
+  referencesByPdf?: Record<string, ReferenceCapture>;
 };
 
 type ReferenceCapture = {
@@ -55,7 +55,7 @@ type ReferenceCapture = {
 
 const STORAGE_KEY = "whichstitch-pdf-workspace-v1";
 const MIN_ZOOM = 0.5;
-const MAX_ZOOM = 2.4;
+const MAX_ZOOM = 10;
 const COUNTER_HITBOX_WIDTH = 150;
 const COUNTER_HITBOX_HEIGHT = 140;
 const COUNTER_GAP = 12;
@@ -87,10 +87,29 @@ function overlaps(a: { x: number; y: number; width: number; height: number }, b:
   return a.x < b.x + b.width && a.x + a.width > b.x && a.y < b.y + b.height && a.y + a.height > b.y;
 }
 
-function clampCounterPosition(x: number, y: number, page: PageMetric): { x: number; y: number } {
+type CounterBounds = {
+  minX: number;
+  maxX: number;
+  minY: number;
+  maxY: number;
+};
+
+function getCounterBounds(page: PageMetric, viewerWidth: number, zoom: number): CounterBounds {
+  const horizontalSlack = Math.max(0, (viewerWidth - page.width * zoom) / 2) / zoom;
+  const minX = -horizontalSlack;
+  const maxX = page.width - COUNTER_HITBOX_WIDTH + horizontalSlack;
   return {
-    x: clamp(x, 0, Math.max(0, page.width - COUNTER_HITBOX_WIDTH)),
-    y: clamp(y, 0, Math.max(0, page.height - COUNTER_HITBOX_HEIGHT))
+    minX,
+    maxX: Math.max(minX, maxX),
+    minY: 0,
+    maxY: Math.max(0, page.height - COUNTER_HITBOX_HEIGHT)
+  };
+}
+
+function clampCounterPosition(x: number, y: number, bounds: CounterBounds): { x: number; y: number } {
+  return {
+    x: clamp(x, bounds.minX, bounds.maxX),
+    y: clamp(y, bounds.minY, bounds.maxY)
   };
 }
 
@@ -118,10 +137,10 @@ function findOpenCounterPosition(
   startX: number,
   startY: number,
   pageIndex: number,
-  page: PageMetric,
+  bounds: CounterBounds,
   counters: KnitCounter[]
 ): { x: number; y: number } {
-  const base = clampCounterPosition(startX, startY, page);
+  const base = clampCounterPosition(startX, startY, bounds);
   if (!isCounterPositionBlocked(base.x, base.y, pageIndex, counters)) {
     return base;
   }
@@ -140,7 +159,7 @@ function findOpenCounterPosition(
     ];
 
     for (const offset of offsets) {
-      const candidate = clampCounterPosition(base.x + offset.dx, base.y + offset.dy, page);
+      const candidate = clampCounterPosition(base.x + offset.dx, base.y + offset.dy, bounds);
       if (!isCounterPositionBlocked(candidate.x, candidate.y, pageIndex, counters)) {
         return candidate;
       }
@@ -159,6 +178,8 @@ export default function HomePage() {
   const [drawTool, setDrawTool] = useState<DrawTool>("rectangle");
   const [strokeColor, setStrokeColor] = useState("#c62828");
   const [highlights, setHighlights] = useState<Annotation[]>([]);
+  const [referencesByPdf, setReferencesByPdf] = useState<Record<string, ReferenceCapture>>({});
+  const [activePdfId, setActivePdfId] = useState<string | null>(null);
   const [referenceCapture, setReferenceCapture] = useState<ReferenceCapture | null>(null);
   const [isSelectingReference, setIsSelectingReference] = useState(false);
   const [isReferencePopoverOpen, setIsReferencePopoverOpen] = useState(false);
@@ -263,8 +284,8 @@ export default function HomePage() {
       if (typeof parsed.strokeColor === "string") {
         setStrokeColor(parsed.strokeColor);
       }
-      if (parsed.referenceCapture && typeof parsed.referenceCapture.imageDataUrl === "string") {
-        setReferenceCapture(parsed.referenceCapture);
+      if (parsed.referencesByPdf && typeof parsed.referencesByPdf === "object") {
+        setReferencesByPdf(parsed.referencesByPdf);
       }
     } catch {
       // Ignore invalid saved tool state.
@@ -283,7 +304,7 @@ export default function HomePage() {
       highlights,
       counters,
       strokeColor,
-      referenceCapture
+      referencesByPdf
     };
 
     try {
@@ -297,7 +318,7 @@ export default function HomePage() {
           highlights,
           counters,
           strokeColor,
-          referenceCapture: null
+          referencesByPdf: {}
         };
         try {
           window.localStorage.setItem(STORAGE_KEY, JSON.stringify(fallbackPayload));
@@ -306,7 +327,7 @@ export default function HomePage() {
         }
       }
     }
-  }, [loadedState, zoom, highlights, counters, strokeColor, referenceCapture]);
+  }, [loadedState, zoom, highlights, counters, strokeColor, referencesByPdf]);
 
   useEffect(() => {
     if (!pdfDoc || !pages.length) {
@@ -461,7 +482,9 @@ export default function HomePage() {
         const rect = pageElement.getBoundingClientRect();
         const rawX = (event.clientX - rect.left) / zoom - drag.offsetX;
         const rawY = (event.clientY - rect.top) / zoom - drag.offsetY;
-        const clamped = clampCounterPosition(rawX, rawY, pageMetric);
+        const viewerWidth = viewerRef.current?.clientWidth ?? pageMetric.width * zoom;
+        const bounds = getCounterBounds(pageMetric, viewerWidth, zoom);
+        const clamped = clampCounterPosition(rawX, rawY, bounds);
         if (isCounterPositionBlocked(clamped.x, clamped.y, drag.pageIndex, counters, drag.counterId)) {
           return;
         }
@@ -508,10 +531,17 @@ export default function HomePage() {
           draftReferenceRect.height
         );
         if (imageDataUrl) {
-          setReferenceCapture({
+          const nextCapture = {
             ...draftReferenceRect,
             imageDataUrl
-          });
+          };
+          setReferenceCapture(nextCapture);
+          if (activePdfId) {
+            setReferencesByPdf((prev) => ({
+              ...prev,
+              [activePdfId]: nextCapture
+            }));
+          }
         }
         setIsSelectingReference(false);
         setIsReferencePopoverOpen(true);
@@ -550,7 +580,7 @@ export default function HomePage() {
       window.removeEventListener("pointermove", handlePointerMove);
       window.removeEventListener("pointerup", handlePointerUp);
     };
-  }, [captureReferenceImage, counters, draftHighlight, draftReferenceRect, isSelectingReference, mode, pages, strokeColor, zoom]);
+  }, [activePdfId, captureReferenceImage, counters, draftHighlight, draftReferenceRect, isSelectingReference, mode, pages, strokeColor, zoom]);
 
   useEffect(() => {
     if (mode === "highlight" || isSelectingReference) {
@@ -560,6 +590,13 @@ export default function HomePage() {
     setDraftHighlight(null);
     setDraftReferenceRect(null);
   }, [isSelectingReference, mode]);
+
+  useEffect(() => {
+    if (!activePdfId) {
+      return;
+    }
+    setReferenceCapture(referencesByPdf[activePdfId] ?? null);
+  }, [activePdfId, referencesByPdf]);
 
   useEffect(() => {
     function onUndoHighlightHotkey(event: KeyboardEvent) {
@@ -606,6 +643,13 @@ export default function HomePage() {
         setPdfDoc(loaded);
         setPages(metrics);
         setPdfFileName(file.name);
+        const nextPdfId = `${file.name}::${file.size}::${file.lastModified}`;
+        setActivePdfId(nextPdfId);
+        setReferenceCapture(referencesByPdf[nextPdfId] ?? null);
+        setIsReferencePopoverOpen(false);
+        setIsSelectingReference(false);
+        setDraftReferenceRect(null);
+        drawingRef.current = null;
       } catch {}
     })();
   }
@@ -686,7 +730,8 @@ export default function HomePage() {
     const localCenterY = (centerY - pageScaledTop) / zoom;
     const startX = localCenterX - COUNTER_HITBOX_WIDTH / 2;
     const startY = localCenterY - COUNTER_HITBOX_HEIGHT / 2;
-    const safe = findOpenCounterPosition(startX, startY, targetPage, page, counters);
+    const bounds = getCounterBounds(page, viewer.clientWidth, zoom);
+    const safe = findOpenCounterPosition(startX, startY, targetPage, bounds, counters);
 
     setCounters((prev) => [
       ...prev,
@@ -989,6 +1034,13 @@ export default function HomePage() {
                   type="button"
                   className="reference-reset-btn"
                   onClick={() => {
+                    if (activePdfId) {
+                      setReferencesByPdf((prev) => {
+                        const next = { ...prev };
+                        delete next[activePdfId];
+                        return next;
+                      });
+                    }
                     setReferenceCapture(null);
                     setIsReferencePopoverOpen(false);
                     setIsSelectingReference(false);
