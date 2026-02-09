@@ -182,17 +182,20 @@ body {
   border-radius: 10px;
   background: #f6faf4;
   box-shadow: 0 8px 20px rgba(23, 36, 27, 0.18);
+  max-width: 92vw;
+  max-height: 80vh;
+  overflow: auto;
 }
 
-.reference-preview {
-  width: min(18rem, 52vw);
-  height: min(12rem, 34vh);
+.reference-preview-image {
+  display: block;
   border-radius: 8px;
   border: 1px solid #b8c6b8;
-  background-size: contain;
-  background-position: center;
-  background-repeat: no-repeat;
   background-color: #fff;
+  width: auto;
+  height: auto;
+  max-width: none;
+  max-height: none;
 }
 
 .reference-reset-btn {
@@ -255,7 +258,7 @@ body {
 
 .pdf-viewer.pan-mode {
   cursor: grab;
-  touch-action: pan-x pan-y pinch-zoom;
+  touch-action: pan-x pan-y;
 }
 
 .pdf-viewer.pan-mode:active {
@@ -494,11 +497,6 @@ body {
     left: 0.45rem;
     right: 0.45rem;
     overflow-x: auto;
-  }
-
-  .reference-preview {
-    width: min(15rem, 76vw);
-    height: min(10rem, 34vh);
   }
 
   .zoom-wrap input {

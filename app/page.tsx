@@ -171,6 +171,13 @@ export default function HomePage() {
   const pageRefs = useRef<(HTMLElement | null)[]>([]);
   const viewerRef = useRef<HTMLDivElement | null>(null);
   const counterUndoHistoryRef = useRef<Record<string, number[]>>({});
+  const touchPointsRef = useRef<Map<number, { x: number; y: number }>>(new Map());
+  const pinchStateRef = useRef<{
+    startDistance: number;
+    startZoom: number;
+    anchorContentX: number;
+    anchorContentY: number;
+  } | null>(null);
 
   const drawingRef = useRef<{
     tool: DrawingTool;
@@ -204,6 +211,31 @@ export default function HomePage() {
 
   useEffect(() => {
     GlobalWorkerOptions.workerSrc = "https://unpkg.com/pdfjs-dist@4.10.38/build/pdf.worker.min.mjs";
+  }, []);
+
+  useEffect(() => {
+    // Keep browser-level pinch zoom disabled so the fixed toolbar stays in screen space.
+    function preventBrowserPinch(event: TouchEvent) {
+      if (event.touches.length > 1) {
+        event.preventDefault();
+      }
+    }
+
+    function preventGestureEvent(event: Event) {
+      event.preventDefault();
+    }
+
+    document.addEventListener("touchmove", preventBrowserPinch, { passive: false });
+    document.addEventListener("gesturestart" as keyof DocumentEventMap, preventGestureEvent, { passive: false });
+    document.addEventListener("gesturechange" as keyof DocumentEventMap, preventGestureEvent, { passive: false });
+    document.addEventListener("gestureend" as keyof DocumentEventMap, preventGestureEvent, { passive: false });
+
+    return () => {
+      document.removeEventListener("touchmove", preventBrowserPinch);
+      document.removeEventListener("gesturestart" as keyof DocumentEventMap, preventGestureEvent);
+      document.removeEventListener("gesturechange" as keyof DocumentEventMap, preventGestureEvent);
+      document.removeEventListener("gestureend" as keyof DocumentEventMap, preventGestureEvent);
+    };
   }, []);
 
   useEffect(() => {
@@ -768,6 +800,95 @@ export default function HomePage() {
     setIsReferencePopoverOpen((prev) => !prev);
   }
 
+  function handleViewerPointerDown(event: React.PointerEvent<HTMLDivElement>) {
+    if (mode !== "pan" || isSelectingReference || event.pointerType !== "touch") {
+      return;
+    }
+
+    touchPointsRef.current.set(event.pointerId, { x: event.clientX, y: event.clientY });
+    if (touchPointsRef.current.size !== 2) {
+      return;
+    }
+
+    const viewer = viewerRef.current;
+    if (!viewer) {
+      return;
+    }
+
+    const points = Array.from(touchPointsRef.current.values());
+    const p1 = points[0];
+    const p2 = points[1];
+    const distance = Math.hypot(p2.x - p1.x, p2.y - p1.y);
+    if (distance < 4) {
+      return;
+    }
+
+    const rect = viewer.getBoundingClientRect();
+    const midpointX = (p1.x + p2.x) / 2;
+    const midpointY = (p1.y + p2.y) / 2;
+    const contentX = viewer.scrollLeft + (midpointX - rect.left);
+    const contentY = viewer.scrollTop + (midpointY - rect.top);
+
+    pinchStateRef.current = {
+      startDistance: distance,
+      startZoom: zoom,
+      anchorContentX: contentX / zoom,
+      anchorContentY: contentY / zoom
+    };
+  }
+
+  function handleViewerPointerMove(event: React.PointerEvent<HTMLDivElement>) {
+    if (mode !== "pan" || isSelectingReference || event.pointerType !== "touch") {
+      return;
+    }
+
+    if (!touchPointsRef.current.has(event.pointerId)) {
+      return;
+    }
+    touchPointsRef.current.set(event.pointerId, { x: event.clientX, y: event.clientY });
+
+    const pinch = pinchStateRef.current;
+    if (!pinch || touchPointsRef.current.size < 2) {
+      return;
+    }
+
+    const viewer = viewerRef.current;
+    if (!viewer) {
+      return;
+    }
+
+    const points = Array.from(touchPointsRef.current.values());
+    const p1 = points[0];
+    const p2 = points[1];
+    const distance = Math.hypot(p2.x - p1.x, p2.y - p1.y);
+    if (distance < 4) {
+      return;
+    }
+
+    event.preventDefault();
+    const nextZoom = clamp((distance / pinch.startDistance) * pinch.startZoom, MIN_ZOOM, MAX_ZOOM);
+    if (Math.abs(nextZoom - zoom) < 0.001) {
+      return;
+    }
+
+    setZoom(nextZoom);
+    const rect = viewer.getBoundingClientRect();
+    const midpointX = (p1.x + p2.x) / 2;
+    const midpointY = (p1.y + p2.y) / 2;
+    viewer.scrollLeft = pinch.anchorContentX * nextZoom - (midpointX - rect.left);
+    viewer.scrollTop = pinch.anchorContentY * nextZoom - (midpointY - rect.top);
+  }
+
+  function handleViewerPointerEnd(event: React.PointerEvent<HTMLDivElement>) {
+    if (event.pointerType !== "touch") {
+      return;
+    }
+    touchPointsRef.current.delete(event.pointerId);
+    if (touchPointsRef.current.size < 2) {
+      pinchStateRef.current = null;
+    }
+  }
+
   return (
     <main className="pdf-app">
       <header className="pdf-toolbar">
@@ -904,6 +1025,10 @@ export default function HomePage() {
             : `pdf-viewer annotate-mode${mode === "highlight" ? " highlight-tools-open" : ""}`
         }
         ref={viewerRef}
+        onPointerDown={handleViewerPointerDown}
+        onPointerMove={handleViewerPointerMove}
+        onPointerUp={handleViewerPointerEnd}
+        onPointerCancel={handleViewerPointerEnd}
       >
         {!pdfDoc ? <div className="empty-state">Load a PDF to start marking your knitting pattern.</div> : null}
 
