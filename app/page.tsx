@@ -207,6 +207,7 @@ export default function HomePage() {
   const pagesLayerRef = useRef<HTMLDivElement | null>(null);
   const nodeRefs = useRef<Record<string, HTMLElement | null>>({});
   const counterUndoHistoryRef = useRef<Record<string, number[]>>({});
+  const textFormatUndoRef = useRef<Record<string, Array<{ fontSize: number; color: string }>>>({});
   const touchPointsRef = useRef<Map<number, { x: number; y: number }>>(new Map());
   const pinchStateRef = useRef<{
     startDistance: number;
@@ -1214,12 +1215,32 @@ export default function HomePage() {
 
   function updateTextAnnotationProperty(id: string, updates: Partial<Pick<Annotation, "fontSize" | "color">>) {
     setHighlights((prev) =>
-      prev.map((item) =>
-        item.id === id
-          ? { ...item, ...updates }
-          : item
+      prev.map((item) => {
+        if (item.id !== id) return item;
+        const stack = textFormatUndoRef.current[id] ?? [];
+        textFormatUndoRef.current[id] = [...stack, { fontSize: item.fontSize ?? 22, color: item.color ?? strokeColor }];
+        return { ...item, ...updates };
+      })
+    );
+  }
+
+  function undoTextFormat(id: string) {
+    const stack = textFormatUndoRef.current[id];
+    if (!stack || stack.length === 0) return;
+    const prev = stack[stack.length - 1];
+    textFormatUndoRef.current[id] = stack.slice(0, -1);
+    setHighlights((h) =>
+      h.map((item) =>
+        item.id === id ? { ...item, fontSize: prev.fontSize, color: prev.color } : item
       )
     );
+  }
+
+  function deleteTextAnnotation(id: string) {
+    setHighlights((prev) => prev.filter((item) => item.id !== id));
+    setSelectedTextAnnotationId(null);
+    setEditingTextAnnotationId(null);
+    delete textFormatUndoRef.current[id];
   }
 
   function startDraggingText(event: React.PointerEvent, annotation: Annotation) {
@@ -1811,6 +1832,24 @@ export default function HomePage() {
                               aria-label={`Set text color ${swatchColor}`}
                             />
                           ))}
+                          <span className="text-toolbar-divider" />
+                          <button
+                            type="button"
+                            className="text-toolbar-btn"
+                            onClick={() => undoTextFormat(item.id)}
+                            disabled={!(textFormatUndoRef.current[item.id]?.length)}
+                            aria-label="Undo formatting"
+                          >
+                            ↩
+                          </button>
+                          <button
+                            type="button"
+                            className="text-toolbar-btn text-toolbar-delete"
+                            onClick={() => deleteTextAnnotation(item.id)}
+                            aria-label="Delete text box"
+                          >
+                            ✕
+                          </button>
                         </div>
                       )}
                       {selectedTextAnnotationId === item.id && (

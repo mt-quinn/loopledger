@@ -575,6 +575,17 @@ body {
   background: rgba(41, 121, 255, 0.10);
 }
 
+.text-toolbar-btn:disabled {
+  opacity: 0.35;
+  cursor: default;
+  pointer-events: none;
+}
+
+.text-toolbar-delete:hover {
+  background: rgba(255, 23, 68, 0.13);
+  color: #d32f2f;
+}
+
 .text-toolbar-size {
   display: inline-flex;
   align-items: center;
