@@ -1,10 +1,11 @@
 "use client";
 
-import { ChangeEvent, useEffect, useMemo, useRef, useState } from "react";
+import { ChangeEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { GlobalWorkerOptions, getDocument, PDFDocumentProxy } from "pdfjs-dist/legacy/build/pdf.mjs";
 
 type ViewerMode = "pan" | "highlight";
 type DrawTool = "rectangle" | "line" | "highlight";
+type DrawingTool = DrawTool | "reference";
 type CounterType = "row" | "stitch";
 
 type PageMetric = {
@@ -40,6 +41,16 @@ type PersistedState = {
   highlights: Annotation[];
   counters: KnitCounter[];
   strokeColor?: string;
+  referenceCapture?: ReferenceCapture | null;
+};
+
+type ReferenceCapture = {
+  pageIndex: number;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  imageDataUrl: string;
 };
 
 const STORAGE_KEY = "whichstitch-pdf-workspace-v1";
@@ -48,6 +59,7 @@ const MAX_ZOOM = 2.4;
 const COUNTER_HITBOX_WIDTH = 150;
 const COUNTER_HITBOX_HEIGHT = 140;
 const COUNTER_GAP = 12;
+const MAX_REFERENCE_IMAGE_DIM = 900;
 const STROKE_PALETTE = [
   "#ff1744",
   "#ff6d00",
@@ -147,6 +159,9 @@ export default function HomePage() {
   const [drawTool, setDrawTool] = useState<DrawTool>("rectangle");
   const [strokeColor, setStrokeColor] = useState("#c62828");
   const [highlights, setHighlights] = useState<Annotation[]>([]);
+  const [referenceCapture, setReferenceCapture] = useState<ReferenceCapture | null>(null);
+  const [isSelectingReference, setIsSelectingReference] = useState(false);
+  const [isReferencePopoverOpen, setIsReferencePopoverOpen] = useState(false);
   const [counters, setCounters] = useState<KnitCounter[]>([]);
   const [editingCounterId, setEditingCounterId] = useState<string | null>(null);
   const [editingCounterTitle, setEditingCounterTitle] = useState("");
@@ -158,7 +173,7 @@ export default function HomePage() {
   const counterUndoHistoryRef = useRef<Record<string, number[]>>({});
 
   const drawingRef = useRef<{
-    tool: DrawTool;
+    tool: DrawingTool;
     pageIndex: number;
     startX: number;
     startY: number;
@@ -179,6 +194,13 @@ export default function HomePage() {
   } | null>(null);
 
   const [draftHighlight, setDraftHighlight] = useState<Annotation | null>(null);
+  const [draftReferenceRect, setDraftReferenceRect] = useState<{
+    pageIndex: number;
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+  } | null>(null);
 
   useEffect(() => {
     GlobalWorkerOptions.workerSrc = "https://unpkg.com/pdfjs-dist@4.10.38/build/pdf.worker.min.mjs";
@@ -205,6 +227,9 @@ export default function HomePage() {
       if (typeof parsed.strokeColor === "string") {
         setStrokeColor(parsed.strokeColor);
       }
+      if (parsed.referenceCapture && typeof parsed.referenceCapture.imageDataUrl === "string") {
+        setReferenceCapture(parsed.referenceCapture);
+      }
     } catch {
       // Ignore invalid saved tool state.
     } finally {
@@ -221,11 +246,31 @@ export default function HomePage() {
       zoom,
       highlights,
       counters,
-      strokeColor
+      strokeColor,
+      referenceCapture
     };
 
-    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
-  }, [loadedState, zoom, highlights, counters, strokeColor]);
+    try {
+      window.localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
+    } catch (error) {
+      // LocalStorage can overflow when a captured reference image is large.
+      // Persist everything else so the app keeps working without runtime errors.
+      if (error instanceof DOMException && error.name === "QuotaExceededError") {
+        const fallbackPayload: PersistedState = {
+          zoom,
+          highlights,
+          counters,
+          strokeColor,
+          referenceCapture: null
+        };
+        try {
+          window.localStorage.setItem(STORAGE_KEY, JSON.stringify(fallbackPayload));
+        } catch {
+          // Ignore secondary persistence failures.
+        }
+      }
+    }
+  }, [loadedState, zoom, highlights, counters, strokeColor, referenceCapture]);
 
   useEffect(() => {
     if (!pdfDoc || !pages.length) {
@@ -266,6 +311,42 @@ export default function HomePage() {
     };
   }, [pdfDoc, pages, zoom]);
 
+  const captureReferenceImage = useCallback((
+    pageIndex: number,
+    x: number,
+    y: number,
+    width: number,
+    height: number
+  ): string | null => {
+    const sourceCanvas = canvasRefs.current[pageIndex];
+    const pageMetric = pages[pageIndex];
+    if (!sourceCanvas || !pageMetric || width <= 0 || height <= 0) {
+      return null;
+    }
+
+    const scaleX = sourceCanvas.width / pageMetric.width;
+    const scaleY = sourceCanvas.height / pageMetric.height;
+    const sx = Math.max(0, Math.floor(x * scaleX));
+    const sy = Math.max(0, Math.floor(y * scaleY));
+    const sw = Math.max(1, Math.floor(width * scaleX));
+    const sh = Math.max(1, Math.floor(height * scaleY));
+
+    const scale = Math.min(1, MAX_REFERENCE_IMAGE_DIM / Math.max(sw, sh));
+    const tw = Math.max(1, Math.floor(sw * scale));
+    const th = Math.max(1, Math.floor(sh * scale));
+
+    const target = document.createElement("canvas");
+    target.width = tw;
+    target.height = th;
+    const context = target.getContext("2d");
+    if (!context) {
+      return null;
+    }
+
+    context.drawImage(sourceCanvas, sx, sy, sw, sh, 0, 0, tw, th);
+    return target.toDataURL("image/jpeg", 0.78);
+  }, [pages]);
+
   useEffect(() => {
     function handlePointerMove(event: PointerEvent) {
       const drawing = drawingRef.current;
@@ -279,6 +360,19 @@ export default function HomePage() {
         const rect = pageElement.getBoundingClientRect();
         const x = clamp((event.clientX - rect.left) / zoom, 0, pages[drawing.pageIndex]?.width ?? 0);
         const y = clamp((event.clientY - rect.top) / zoom, 0, pages[drawing.pageIndex]?.height ?? 0);
+
+        if (drawing.tool === "reference") {
+          const startX = Math.min(drawing.startX, x);
+          const startY = Math.min(drawing.startY, y);
+          setDraftReferenceRect({
+            pageIndex: drawing.pageIndex,
+            x: startX,
+            y: startY,
+            width: Math.abs(x - drawing.startX),
+            height: Math.abs(y - drawing.startY)
+          });
+          return;
+        }
 
         if (drawing.tool === "rectangle" || drawing.tool === "highlight") {
           const startX = Math.min(drawing.startX, x);
@@ -354,13 +448,31 @@ export default function HomePage() {
 
     function handlePointerUp() {
       const drawing = drawingRef.current;
+      if (drawing?.tool === "reference" && draftReferenceRect && draftReferenceRect.width > 12 && draftReferenceRect.height > 12) {
+        const imageDataUrl = captureReferenceImage(
+          draftReferenceRect.pageIndex,
+          draftReferenceRect.x,
+          draftReferenceRect.y,
+          draftReferenceRect.width,
+          draftReferenceRect.height
+        );
+        if (imageDataUrl) {
+          setReferenceCapture({
+            ...draftReferenceRect,
+            imageDataUrl
+          });
+        }
+        setIsSelectingReference(false);
+        setIsReferencePopoverOpen(true);
+      }
+
       if (
         (drawing?.tool === "rectangle" || drawing?.tool === "highlight") &&
         draftHighlight &&
         draftHighlight.width > 10 &&
         draftHighlight.height > 10
       ) {
-        setHighlights((prev) => [...prev, { ...draftHighlight, id: `hl-${Date.now()}`, kind: drawing.tool }]);
+        setHighlights((prev) => [...prev, { ...draftHighlight, id: `hl-${Date.now()}`, kind: draftHighlight.kind }]);
       }
 
       if (drawing?.tool === "line" && draftHighlight?.kind === "line") {
@@ -377,6 +489,7 @@ export default function HomePage() {
       draggingCounterRef.current = null;
       panningRef.current = null;
       setDraftHighlight(null);
+      setDraftReferenceRect(null);
     }
 
     window.addEventListener("pointermove", handlePointerMove);
@@ -386,7 +499,7 @@ export default function HomePage() {
       window.removeEventListener("pointermove", handlePointerMove);
       window.removeEventListener("pointerup", handlePointerUp);
     };
-  }, [draftHighlight, pages, zoom, strokeColor, counters]);
+  }, [captureReferenceImage, counters, draftHighlight, draftReferenceRect, pages, strokeColor, zoom]);
 
   useEffect(() => {
     function onUndoHighlightHotkey(event: KeyboardEvent) {
@@ -444,6 +557,15 @@ export default function HomePage() {
 
     const pageElement = pageRefs.current[pageIndex];
     if (!pageElement) {
+      return;
+    }
+
+    if (isSelectingReference) {
+      event.preventDefault();
+      const rect = pageElement.getBoundingClientRect();
+      const startX = clamp((event.clientX - rect.left) / zoom, 0, pages[pageIndex]?.width ?? 0);
+      const startY = clamp((event.clientY - rect.top) / zoom, 0, pages[pageIndex]?.height ?? 0);
+      drawingRef.current = { tool: "reference", pageIndex, startX, startY };
       return;
     }
 
@@ -629,6 +751,23 @@ export default function HomePage() {
     setHighlights((prev) => (prev.length ? prev.slice(0, -1) : prev));
   }
 
+  function onReferenceButtonClick() {
+    if (isSelectingReference) {
+      setIsSelectingReference(false);
+      setDraftReferenceRect(null);
+      drawingRef.current = null;
+      return;
+    }
+
+    if (!referenceCapture) {
+      setIsSelectingReference(true);
+      setIsReferencePopoverOpen(false);
+      return;
+    }
+
+    setIsReferencePopoverOpen((prev) => !prev);
+  }
+
   return (
     <main className="pdf-app">
       <header className="pdf-toolbar">
@@ -647,6 +786,44 @@ export default function HomePage() {
           <button type="button" className={mode === "highlight" ? "toolbar-btn active" : "toolbar-btn"} onClick={() => setMode("highlight")}>
             Annotate
           </button>
+          <div className="reference-wrap">
+            <button
+              type="button"
+              className={isSelectingReference ? "toolbar-btn active reference-btn" : "toolbar-btn reference-btn"}
+              onClick={onReferenceButtonClick}
+            >
+              <span>Reference</span>
+              {referenceCapture ? (
+                <span
+                  className="reference-thumb"
+                  style={{ backgroundImage: `url(${referenceCapture.imageDataUrl})` }}
+                  aria-hidden="true"
+                />
+              ) : null}
+            </button>
+            {isReferencePopoverOpen && referenceCapture ? (
+              <div className="reference-popover">
+                <img
+                  className="reference-preview-image"
+                  src={referenceCapture.imageDataUrl}
+                  alt="Reference capture"
+                />
+                <button
+                  type="button"
+                  className="reference-reset-btn"
+                  onClick={() => {
+                    setReferenceCapture(null);
+                    setIsReferencePopoverOpen(false);
+                    setIsSelectingReference(false);
+                    setDraftReferenceRect(null);
+                    drawingRef.current = null;
+                  }}
+                >
+                  Reset
+                </button>
+              </div>
+            ) : null}
+          </div>
           <button type="button" className="toolbar-btn" onClick={() => addCounter("row")}>
             Add Row Counter
           </button>
@@ -721,7 +898,11 @@ export default function HomePage() {
       ) : null}
 
       <section
-        className={mode === "pan" ? "pdf-viewer pan-mode" : "pdf-viewer annotate-mode highlight-tools-open"}
+        className={
+          mode === "pan" && !isSelectingReference
+            ? "pdf-viewer pan-mode"
+            : `pdf-viewer annotate-mode${mode === "highlight" ? " highlight-tools-open" : ""}`
+        }
         ref={viewerRef}
       >
         {!pdfDoc ? <div className="empty-state">Load a PDF to start marking your knitting pattern.</div> : null}
@@ -743,6 +924,18 @@ export default function HomePage() {
             />
 
             <div className="overlay-layer" onPointerDown={(event) => pageOverlayPointerDown(event, pageIndex)}>
+              {draftReferenceRect && draftReferenceRect.pageIndex === pageIndex ? (
+                <div
+                  className="reference-selection"
+                  style={{
+                    left: draftReferenceRect.x * zoom,
+                    top: draftReferenceRect.y * zoom,
+                    width: draftReferenceRect.width * zoom,
+                    height: draftReferenceRect.height * zoom
+                  }}
+                />
+              ) : null}
+
               {visibleHighlights
                 .filter((item) => item.pageIndex === pageIndex)
                 .map((item) => (

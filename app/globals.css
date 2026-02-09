@@ -152,6 +152,60 @@ body {
   cursor: pointer;
 }
 
+.reference-wrap {
+  position: relative;
+}
+
+.reference-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.reference-thumb {
+  width: 2.1rem;
+  height: 1.35rem;
+  border-radius: 4px;
+  border: 1px solid #a9b6aa;
+  background-size: cover;
+  background-position: center;
+  background-color: #fff;
+}
+
+.reference-popover {
+  position: absolute;
+  top: calc(100% + 0.35rem);
+  left: 0;
+  z-index: 40;
+  padding: 0.35rem;
+  border: 1px solid #aebcad;
+  border-radius: 10px;
+  background: #f6faf4;
+  box-shadow: 0 8px 20px rgba(23, 36, 27, 0.18);
+}
+
+.reference-preview {
+  width: min(18rem, 52vw);
+  height: min(12rem, 34vh);
+  border-radius: 8px;
+  border: 1px solid #b8c6b8;
+  background-size: contain;
+  background-position: center;
+  background-repeat: no-repeat;
+  background-color: #fff;
+}
+
+.reference-reset-btn {
+  margin-top: 0.4rem;
+  width: 100%;
+  border: 1px solid #b7c3b7;
+  border-radius: 8px;
+  background: #fff;
+  color: #2a362d;
+  min-height: 2rem;
+  font-weight: 700;
+}
+
 .status-chip {
   border: 1px solid var(--line);
   border-radius: 999px;
@@ -264,6 +318,14 @@ body {
   border: 0;
   border-radius: 5px;
   background: rgba(255, 232, 26, 0.33);
+  pointer-events: none;
+}
+
+.reference-selection {
+  position: absolute;
+  border: 2px dashed #135ca8;
+  background: rgba(18, 92, 168, 0.12);
+  border-radius: 4px;
   pointer-events: none;
 }
 
@@ -432,6 +494,11 @@ body {
     left: 0.45rem;
     right: 0.45rem;
     overflow-x: auto;
+  }
+
+  .reference-preview {
+    width: min(15rem, 76vw);
+    height: min(10rem, 34vh);
   }
 
   .zoom-wrap input {
