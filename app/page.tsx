@@ -258,6 +258,13 @@ export default function HomePage() {
   const [connectTargetCounterId, setConnectTargetCounterId] = useState<string | null>(null);
   const [draftFreeDraw, setDraftFreeDraw] = useState<Annotation | null>(null);
   const [editingTextAnnotationId, setEditingTextAnnotationId] = useState<string | null>(null);
+  const [selectedTextAnnotationId, setSelectedTextAnnotationId] = useState<string | null>(null);
+  const draggingTextRef = useRef<{
+    annotationId: string;
+    pageIndex: number;
+    offsetX: number;
+    offsetY: number;
+  } | null>(null);
   const [annotateScrollMax, setAnnotateScrollMax] = useState(0);
   const [annotateScrollValue, setAnnotateScrollValue] = useState(0);
   const connectDragRef = useRef<{
@@ -588,6 +595,30 @@ export default function HomePage() {
         return;
       }
 
+      const textDrag = draggingTextRef.current;
+      if (textDrag) {
+        const pageElement = pageRefs.current[textDrag.pageIndex];
+        const pageMetric = pages[textDrag.pageIndex];
+        if (!pageElement || !pageMetric) {
+          return;
+        }
+
+        const rect = pageElement.getBoundingClientRect();
+        const rawX = (event.clientX - rect.left) / zoom - textDrag.offsetX;
+        const rawY = (event.clientY - rect.top) / zoom - textDrag.offsetY;
+        const clampedX = clamp(rawX, 0, pageMetric.width - 10);
+        const clampedY = clamp(rawY, 0, pageMetric.height - 10);
+
+        setHighlights((prev) =>
+          prev.map((item) =>
+            item.id === textDrag.annotationId
+              ? { ...item, x: clampedX, y: clampedY }
+              : item
+          )
+        );
+        return;
+      }
+
       const connecting = connectDragRef.current;
       if (connecting) {
         const pageElement = pageRefs.current[connecting.pageIndex];
@@ -628,6 +659,7 @@ export default function HomePage() {
       if (drawing && mode !== "highlight" && !isSelectingReference) {
         cancelInProgressAnnotation();
         draggingCounterRef.current = null;
+        draggingTextRef.current = null;
         panningRef.current = null;
         return;
       }
@@ -682,6 +714,7 @@ export default function HomePage() {
 
       drawingRef.current = null;
       draggingCounterRef.current = null;
+      draggingTextRef.current = null;
       panningRef.current = null;
       cancelInProgressAnnotation();
 
@@ -800,6 +833,16 @@ export default function HomePage() {
 
   useEffect(() => {
     function onUndoHighlightHotkey(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        const target = event.target as HTMLElement | null;
+        if (target?.classList.contains("text-annotation-input")) {
+          return;
+        }
+        setSelectedTextAnnotationId(null);
+        setEditingTextAnnotationId(null);
+        return;
+      }
+
       const isUndo = (event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "z";
       if (!isUndo) {
         return;
@@ -863,6 +906,10 @@ export default function HomePage() {
       return;
     }
 
+    const hadTextSelected = selectedTextAnnotationId !== null;
+    setSelectedTextAnnotationId(null);
+    setEditingTextAnnotationId(null);
+
     const pageElement = pageRefs.current[pageIndex];
     if (!pageElement) {
       return;
@@ -884,6 +931,9 @@ export default function HomePage() {
       const startY = clamp((event.clientY - rect.top) / zoom, 0, pages[pageIndex]?.height ?? 0);
 
       if (drawTool === "text") {
+        if (hadTextSelected) {
+          return;
+        }
         const id = `hl-${Date.now()}`;
         setHighlights((prev) => [
           ...prev,
@@ -900,6 +950,7 @@ export default function HomePage() {
             fontSize: 22
           }
         ]);
+        setSelectedTextAnnotationId(id);
         setEditingTextAnnotationId(id);
         return;
       }
@@ -1159,6 +1210,34 @@ export default function HomePage() {
           : item
       )
     );
+  }
+
+  function updateTextAnnotationProperty(id: string, updates: Partial<Pick<Annotation, "fontSize" | "color">>) {
+    setHighlights((prev) =>
+      prev.map((item) =>
+        item.id === id
+          ? { ...item, ...updates }
+          : item
+      )
+    );
+  }
+
+  function startDraggingText(event: React.PointerEvent, annotation: Annotation) {
+    event.stopPropagation();
+    event.preventDefault();
+
+    const pageElement = pageRefs.current[annotation.pageIndex];
+    if (!pageElement) {
+      return;
+    }
+
+    const rect = pageElement.getBoundingClientRect();
+    draggingTextRef.current = {
+      annotationId: annotation.id,
+      pageIndex: annotation.pageIndex,
+      offsetX: (event.clientX - rect.left) / zoom - annotation.x,
+      offsetY: (event.clientY - rect.top) / zoom - annotation.y
+    };
   }
 
   function applyCounterIncrement(counterId: string, amount: number) {
@@ -1687,7 +1766,7 @@ export default function HomePage() {
                   ) : item.kind === "text" ? (
                     <div
                       key={item.id}
-                      className="text-annotation"
+                      className={`text-annotation${selectedTextAnnotationId === item.id ? " text-annotation-selected" : ""}`}
                       style={{
                         left: item.x * zoom,
                         top: item.y * zoom,
@@ -1696,6 +1775,52 @@ export default function HomePage() {
                       }}
                       onPointerDown={(event) => event.stopPropagation()}
                     >
+                      {selectedTextAnnotationId === item.id && (
+                        <div className="text-annotation-toolbar" onPointerDown={(event) => event.stopPropagation()}>
+                          <button
+                            type="button"
+                            className="text-toolbar-btn"
+                            onClick={() => {
+                              const current = item.fontSize ?? 22;
+                              if (current > 8) updateTextAnnotationProperty(item.id, { fontSize: current - 2 });
+                            }}
+                            aria-label="Decrease font size"
+                          >
+                            A&#x2212;
+                          </button>
+                          <span className="text-toolbar-size">{item.fontSize ?? 22}</span>
+                          <button
+                            type="button"
+                            className="text-toolbar-btn"
+                            onClick={() => {
+                              const current = item.fontSize ?? 22;
+                              if (current < 120) updateTextAnnotationProperty(item.id, { fontSize: current + 2 });
+                            }}
+                            aria-label="Increase font size"
+                          >
+                            A+
+                          </button>
+                          <span className="text-toolbar-divider" />
+                          {STROKE_PALETTE.map((swatchColor) => (
+                            <button
+                              key={swatchColor}
+                              type="button"
+                              className={`text-toolbar-swatch${(item.color ?? strokeColor) === swatchColor ? " active" : ""}`}
+                              style={{ background: swatchColor }}
+                              onClick={() => updateTextAnnotationProperty(item.id, { color: swatchColor })}
+                              aria-label={`Set text color ${swatchColor}`}
+                            />
+                          ))}
+                        </div>
+                      )}
+                      {selectedTextAnnotationId === item.id && (
+                        <button
+                          type="button"
+                          className="text-annotation-drag-handle"
+                          onPointerDown={(event) => startDraggingText(event, item)}
+                          aria-label="Drag text annotation"
+                        />
+                      )}
                       {editingTextAnnotationId === item.id ? (
                         <textarea
                           value={item.text ?? ""}
@@ -1714,7 +1839,17 @@ export default function HomePage() {
                         <button
                           type="button"
                           className="text-annotation-label"
-                          onClick={() => setEditingTextAnnotationId(item.id)}
+                          onClick={() => {
+                            if (selectedTextAnnotationId === item.id) {
+                              setEditingTextAnnotationId(item.id);
+                            } else {
+                              setSelectedTextAnnotationId(item.id);
+                            }
+                          }}
+                          onDoubleClick={() => {
+                            setSelectedTextAnnotationId(item.id);
+                            setEditingTextAnnotationId(item.id);
+                          }}
                         >
                           {(item.text && item.text.length > 0) ? item.text : "Type..."}
                         </button>

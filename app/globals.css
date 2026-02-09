@@ -490,6 +490,128 @@ body {
   line-height: 1.2;
   padding: 0.12rem 0.24rem;
   text-align: left;
+  cursor: pointer;
+}
+
+.text-annotation-selected {
+  outline: 2px solid #2979ff;
+  outline-offset: 3px;
+  border-radius: 6px;
+}
+
+.text-annotation-selected > .text-annotation-label {
+  border-color: #2979ff;
+}
+
+/* --- Drag handle --- */
+.text-annotation-drag-handle {
+  position: absolute;
+  top: 0;
+  left: -1.6rem;
+  width: 1.4rem;
+  height: 1.6rem;
+  padding: 0;
+  border: 0;
+  border-radius: 4px 0 0 4px;
+  background: rgba(41, 121, 255, 0.12);
+  cursor: grab;
+  touch-action: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.text-annotation-drag-handle:active {
+  cursor: grabbing;
+  background: rgba(41, 121, 255, 0.22);
+}
+
+.text-annotation-drag-handle::before {
+  content: "";
+  width: 0.7rem;
+  height: 0.8rem;
+  background-image: radial-gradient(circle, #2979ff 1.1px, transparent 1.1px);
+  background-size: 0.28rem 0.28rem;
+}
+
+/* --- Context toolbar --- */
+.text-annotation-toolbar {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 4px 6px;
+  background: var(--card-bg, #fff);
+  border: 1px solid var(--counter-line, #c5d0ca);
+  border-radius: 8px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.13);
+  white-space: nowrap;
+  z-index: 20;
+  font-size: 13px;
+  color: var(--fg, #222);
+  user-select: none;
+}
+
+.text-toolbar-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 28px;
+  height: 26px;
+  padding: 0 5px;
+  border: 1px solid var(--counter-line, #c5d0ca);
+  border-radius: 5px;
+  background: transparent;
+  color: var(--fg, #222);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.12s;
+}
+
+.text-toolbar-btn:hover {
+  background: rgba(41, 121, 255, 0.10);
+}
+
+.text-toolbar-size {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 24px;
+  height: 26px;
+  font-size: 12px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.text-toolbar-divider {
+  width: 1px;
+  height: 18px;
+  background: var(--counter-line, #c5d0ca);
+  margin: 0 4px;
+}
+
+.text-toolbar-swatch {
+  width: 16px;
+  height: 16px;
+  min-width: 16px;
+  border-radius: 50%;
+  border: 2px solid transparent;
+  cursor: pointer;
+  padding: 0;
+  transition: border-color 0.12s, transform 0.12s;
+}
+
+.text-toolbar-swatch:hover {
+  transform: scale(1.18);
+}
+
+.text-toolbar-swatch.active {
+  border-color: var(--fg, #222);
+  box-shadow: 0 0 0 1px #fff inset;
 }
 
 .knit-counter {
