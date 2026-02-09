@@ -20,6 +20,7 @@ type Annotation = {
   y: number;
   width: number;
   height: number;
+  color?: string;
   x2?: number;
   y2?: number;
 };
@@ -38,11 +39,29 @@ type PersistedState = {
   zoom: number;
   highlights: Annotation[];
   counters: KnitCounter[];
+  strokeColor?: string;
 };
 
 const STORAGE_KEY = "whichstitch-pdf-workspace-v1";
 const MIN_ZOOM = 0.5;
 const MAX_ZOOM = 2.4;
+const COUNTER_HITBOX_WIDTH = 150;
+const COUNTER_HITBOX_HEIGHT = 140;
+const COUNTER_GAP = 12;
+const STROKE_PALETTE = [
+  "#ff1744",
+  "#ff6d00",
+  "#ffea00",
+  "#76ff03",
+  "#00e676",
+  "#00e5ff",
+  "#00b0ff",
+  "#2979ff",
+  "#651fff",
+  "#d500f9",
+  "#f50057",
+  "#ff4081"
+];
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
@@ -52,6 +71,73 @@ function formatCounterLabel(type: CounterType): string {
   return type === "row" ? "Row" : "Stitch";
 }
 
+function overlaps(a: { x: number; y: number; width: number; height: number }, b: { x: number; y: number; width: number; height: number }): boolean {
+  return a.x < b.x + b.width && a.x + a.width > b.x && a.y < b.y + b.height && a.y + a.height > b.y;
+}
+
+function clampCounterPosition(x: number, y: number, page: PageMetric): { x: number; y: number } {
+  return {
+    x: clamp(x, 0, Math.max(0, page.width - COUNTER_HITBOX_WIDTH)),
+    y: clamp(y, 0, Math.max(0, page.height - COUNTER_HITBOX_HEIGHT))
+  };
+}
+
+function isCounterPositionBlocked(
+  x: number,
+  y: number,
+  pageIndex: number,
+  counters: KnitCounter[],
+  ignoreId?: string
+): boolean {
+  const candidate = { x, y, width: COUNTER_HITBOX_WIDTH, height: COUNTER_HITBOX_HEIGHT };
+  return counters
+    .filter((counter) => counter.pageIndex === pageIndex && counter.id !== ignoreId)
+    .some((counter) =>
+      overlaps(candidate, {
+        x: counter.x,
+        y: counter.y,
+        width: COUNTER_HITBOX_WIDTH,
+        height: COUNTER_HITBOX_HEIGHT
+      })
+    );
+}
+
+function findOpenCounterPosition(
+  startX: number,
+  startY: number,
+  pageIndex: number,
+  page: PageMetric,
+  counters: KnitCounter[]
+): { x: number; y: number } {
+  const base = clampCounterPosition(startX, startY, page);
+  if (!isCounterPositionBlocked(base.x, base.y, pageIndex, counters)) {
+    return base;
+  }
+
+  const step = COUNTER_HITBOX_WIDTH + COUNTER_GAP;
+  for (let ring = 1; ring <= 10; ring += 1) {
+    const offsets = [
+      { dx: 0, dy: -ring * step },
+      { dx: ring * step, dy: 0 },
+      { dx: 0, dy: ring * step },
+      { dx: -ring * step, dy: 0 },
+      { dx: ring * step, dy: -ring * step },
+      { dx: ring * step, dy: ring * step },
+      { dx: -ring * step, dy: ring * step },
+      { dx: -ring * step, dy: -ring * step }
+    ];
+
+    for (const offset of offsets) {
+      const candidate = clampCounterPosition(base.x + offset.dx, base.y + offset.dy, page);
+      if (!isCounterPositionBlocked(candidate.x, candidate.y, pageIndex, counters)) {
+        return candidate;
+      }
+    }
+  }
+
+  return base;
+}
+
 export default function HomePage() {
   const [pdfDoc, setPdfDoc] = useState<PDFDocumentProxy | null>(null);
   const [pdfFileName, setPdfFileName] = useState("No PDF loaded");
@@ -59,6 +145,7 @@ export default function HomePage() {
   const [zoom, setZoom] = useState(1.1);
   const [mode, setMode] = useState<ViewerMode>("pan");
   const [drawTool, setDrawTool] = useState<DrawTool>("rectangle");
+  const [strokeColor, setStrokeColor] = useState("#c62828");
   const [highlights, setHighlights] = useState<Annotation[]>([]);
   const [counters, setCounters] = useState<KnitCounter[]>([]);
   const [editingCounterId, setEditingCounterId] = useState<string | null>(null);
@@ -75,8 +162,6 @@ export default function HomePage() {
     pageIndex: number;
     startX: number;
     startY: number;
-    lastX: number;
-    lastY: number;
   } | null>(null);
 
   const draggingCounterRef = useRef<{
@@ -117,6 +202,9 @@ export default function HomePage() {
       if (Array.isArray(parsed.counters)) {
         setCounters(parsed.counters.map((counter) => ({ ...counter })));
       }
+      if (typeof parsed.strokeColor === "string") {
+        setStrokeColor(parsed.strokeColor);
+      }
     } catch {
       // Ignore invalid saved tool state.
     } finally {
@@ -132,11 +220,12 @@ export default function HomePage() {
     const payload: PersistedState = {
       zoom,
       highlights,
-      counters
+      counters,
+      strokeColor
     };
 
     window.localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
-  }, [loadedState, zoom, highlights, counters]);
+  }, [loadedState, zoom, highlights, counters, strokeColor]);
 
   useEffect(() => {
     if (!pdfDoc || !pages.length) {
@@ -178,9 +267,10 @@ export default function HomePage() {
   }, [pdfDoc, pages, zoom]);
 
   useEffect(() => {
-    function handlePointerMove(event: MouseEvent) {
+    function handlePointerMove(event: PointerEvent) {
       const drawing = drawingRef.current;
       if (drawing) {
+        event.preventDefault();
         const pageElement = pageRefs.current[drawing.pageIndex];
         if (!pageElement) {
           return;
@@ -190,18 +280,19 @@ export default function HomePage() {
         const x = clamp((event.clientX - rect.left) / zoom, 0, pages[drawing.pageIndex]?.width ?? 0);
         const y = clamp((event.clientY - rect.top) / zoom, 0, pages[drawing.pageIndex]?.height ?? 0);
 
-        if (drawing.tool === "rectangle") {
+        if (drawing.tool === "rectangle" || drawing.tool === "highlight") {
           const startX = Math.min(drawing.startX, x);
           const startY = Math.min(drawing.startY, y);
 
           setDraftHighlight({
             id: "draft",
-            kind: "rectangle",
+            kind: drawing.tool,
             pageIndex: drawing.pageIndex,
             x: startX,
             y: startY,
             width: Math.abs(x - drawing.startX),
-            height: Math.abs(y - drawing.startY)
+            height: Math.abs(y - drawing.startY),
+            color: drawing.tool === "rectangle" ? strokeColor : undefined
           });
           return;
         }
@@ -216,31 +307,9 @@ export default function HomePage() {
             width: 0,
             height: 0,
             x2: x,
-            y2: y
+            y2: y,
+            color: strokeColor
           });
-          return;
-        }
-
-        const dx = x - drawing.lastX;
-        const dy = y - drawing.lastY;
-        if (Math.hypot(dx, dy) >= 12) {
-          drawingRef.current = {
-            ...drawing,
-            lastX: x,
-            lastY: y
-          };
-          setHighlights((prev) => [
-            ...prev,
-            {
-              id: `hl-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`,
-              kind: "highlight",
-              pageIndex: drawing.pageIndex,
-              x: x - 7,
-              y: y - 6,
-              width: 14,
-              height: 12
-            }
-          ]);
         }
         return;
       }
@@ -254,16 +323,20 @@ export default function HomePage() {
         }
 
         const rect = pageElement.getBoundingClientRect();
-        const x = clamp((event.clientX - rect.left) / zoom - drag.offsetX, 0, pageMetric.width - 8);
-        const y = clamp((event.clientY - rect.top) / zoom - drag.offsetY, 0, pageMetric.height - 8);
+        const rawX = (event.clientX - rect.left) / zoom - drag.offsetX;
+        const rawY = (event.clientY - rect.top) / zoom - drag.offsetY;
+        const clamped = clampCounterPosition(rawX, rawY, pageMetric);
+        if (isCounterPositionBlocked(clamped.x, clamped.y, drag.pageIndex, counters, drag.counterId)) {
+          return;
+        }
 
         setCounters((prev) =>
           prev.map((counter) =>
             counter.id === drag.counterId
               ? {
                   ...counter,
-                  x,
-                  y
+                  x: clamped.x,
+                  y: clamped.y
                 }
               : counter
           )
@@ -281,12 +354,20 @@ export default function HomePage() {
 
     function handlePointerUp() {
       const drawing = drawingRef.current;
-      if (drawing?.tool === "rectangle" && draftHighlight && draftHighlight.width > 10 && draftHighlight.height > 10) {
-        setHighlights((prev) => [...prev, { ...draftHighlight, id: `hl-${Date.now()}`, kind: "rectangle" }]);
+      if (
+        (drawing?.tool === "rectangle" || drawing?.tool === "highlight") &&
+        draftHighlight &&
+        draftHighlight.width > 10 &&
+        draftHighlight.height > 10
+      ) {
+        setHighlights((prev) => [...prev, { ...draftHighlight, id: `hl-${Date.now()}`, kind: drawing.tool }]);
       }
 
       if (drawing?.tool === "line" && draftHighlight?.kind === "line") {
-        const lineLength = Math.hypot((draftHighlight.x2 ?? draftHighlight.x) - draftHighlight.x, (draftHighlight.y2 ?? draftHighlight.y) - draftHighlight.y);
+        const lineLength = Math.hypot(
+          (draftHighlight.x2 ?? draftHighlight.x) - draftHighlight.x,
+          (draftHighlight.y2 ?? draftHighlight.y) - draftHighlight.y
+        );
         if (lineLength > 8) {
           setHighlights((prev) => [...prev, { ...draftHighlight, id: `hl-${Date.now()}`, kind: "line" }]);
         }
@@ -298,14 +379,14 @@ export default function HomePage() {
       setDraftHighlight(null);
     }
 
-    window.addEventListener("mousemove", handlePointerMove);
-    window.addEventListener("mouseup", handlePointerUp);
+    window.addEventListener("pointermove", handlePointerMove);
+    window.addEventListener("pointerup", handlePointerUp);
 
     return () => {
-      window.removeEventListener("mousemove", handlePointerMove);
-      window.removeEventListener("mouseup", handlePointerUp);
+      window.removeEventListener("pointermove", handlePointerMove);
+      window.removeEventListener("pointerup", handlePointerUp);
     };
-  }, [draftHighlight, pages, zoom]);
+  }, [draftHighlight, pages, zoom, strokeColor, counters]);
 
   useEffect(() => {
     function onUndoHighlightHotkey(event: KeyboardEvent) {
@@ -356,7 +437,7 @@ export default function HomePage() {
     })();
   }
 
-  function pageOverlayMouseDown(event: React.MouseEvent, pageIndex: number) {
+  function pageOverlayPointerDown(event: React.PointerEvent, pageIndex: number) {
     if (event.button !== 0) {
       return;
     }
@@ -367,26 +448,16 @@ export default function HomePage() {
     }
 
     if (mode === "highlight") {
+      event.preventDefault();
       const rect = pageElement.getBoundingClientRect();
       const startX = clamp((event.clientX - rect.left) / zoom, 0, pages[pageIndex]?.width ?? 0);
       const startY = clamp((event.clientY - rect.top) / zoom, 0, pages[pageIndex]?.height ?? 0);
 
-      if (drawTool === "highlight") {
-        setHighlights((prev) => [
-          ...prev,
-          {
-            id: `hl-${Date.now()}`,
-            kind: "highlight",
-            pageIndex,
-            x: startX - 7,
-            y: startY - 6,
-            width: 14,
-            height: 12
-          }
-        ]);
-      }
+      drawingRef.current = { tool: drawTool, pageIndex, startX, startY };
+      return;
+    }
 
-      drawingRef.current = { tool: drawTool, pageIndex, startX, startY, lastX: startX, lastY: startY };
+    if (event.pointerType !== "mouse") {
       return;
     }
 
@@ -409,8 +480,8 @@ export default function HomePage() {
       return;
     }
 
-    const viewerRect = viewer.getBoundingClientRect();
-    const centerY = viewer.scrollTop + viewerRect.height / 2;
+    const centerY = viewer.scrollTop + viewer.clientHeight / 2;
+    const centerX = viewer.scrollLeft + viewer.clientWidth / 2;
 
     let targetPage = 0;
     let accumulatedHeight = 0;
@@ -426,13 +497,22 @@ export default function HomePage() {
     }
 
     const page = pages[targetPage];
+    const pageScaledWidth = page.width * zoom;
+    const pageScaledLeft = Math.max((viewer.clientWidth - pageScaledWidth) / 2, 0);
+    const pageScaledTop = accumulatedHeight;
+    const localCenterX = (centerX - pageScaledLeft) / zoom;
+    const localCenterY = (centerY - pageScaledTop) / zoom;
+    const startX = localCenterX - COUNTER_HITBOX_WIDTH / 2;
+    const startY = localCenterY - COUNTER_HITBOX_HEIGHT / 2;
+    const safe = findOpenCounterPosition(startX, startY, targetPage, page, counters);
+
     setCounters((prev) => [
       ...prev,
       {
         id: `counter-${Date.now()}`,
         pageIndex: targetPage,
-        x: page.width * 0.34,
-        y: page.height * 0.22,
+        x: safe.x,
+        y: safe.y,
         type,
         label: formatCounterLabel(type),
         value: 0
@@ -440,13 +520,9 @@ export default function HomePage() {
     ]);
   }
 
-  function startDraggingCounter(event: React.MouseEvent, counter: KnitCounter) {
-    const target = event.target as HTMLElement;
-    if (target.closest("input, button, select, textarea, label")) {
-      return;
-    }
-
+  function startDraggingCounter(event: React.PointerEvent, counter: KnitCounter) {
     event.stopPropagation();
+    event.preventDefault();
 
     const pageElement = pageRefs.current[counter.pageIndex];
     if (!pageElement) {
@@ -618,6 +694,21 @@ export default function HomePage() {
           >
             Draw Highlight
           </button>
+          <div className="color-picker-wrap" role="group" aria-label="Annotation stroke color">
+            <span>Stroke</span>
+            <div className="stroke-palette">
+              {STROKE_PALETTE.map((color) => (
+                <button
+                  key={color}
+                  type="button"
+                  className={strokeColor === color ? "stroke-swatch active" : "stroke-swatch"}
+                  style={{ background: color }}
+                  onClick={() => setStrokeColor(color)}
+                  aria-label={`Set stroke color ${color}`}
+                />
+              ))}
+            </div>
+          </div>
           <button
             type="button"
             className="toolbar-btn"
@@ -629,7 +720,10 @@ export default function HomePage() {
         </div>
       ) : null}
 
-      <section className={mode === "pan" ? "pdf-viewer pan-mode" : "pdf-viewer highlight-tools-open"} ref={viewerRef}>
+      <section
+        className={mode === "pan" ? "pdf-viewer pan-mode" : "pdf-viewer annotate-mode highlight-tools-open"}
+        ref={viewerRef}
+      >
         {!pdfDoc ? <div className="empty-state">Load a PDF to start marking your knitting pattern.</div> : null}
 
         {pages.map((page, pageIndex) => (
@@ -648,7 +742,7 @@ export default function HomePage() {
               className="pdf-canvas"
             />
 
-            <div className="overlay-layer" onMouseDown={(event) => pageOverlayMouseDown(event, pageIndex)}>
+            <div className="overlay-layer" onPointerDown={(event) => pageOverlayPointerDown(event, pageIndex)}>
               {visibleHighlights
                 .filter((item) => item.pageIndex === pageIndex)
                 .map((item) => (
@@ -659,6 +753,7 @@ export default function HomePage() {
                       style={{
                         left: item.x * zoom,
                         top: item.y * zoom,
+                        background: item.color ?? strokeColor,
                         width: Math.hypot(((item.x2 ?? item.x) - item.x) * zoom, ((item.y2 ?? item.y) - item.y) * zoom),
                         transform: `rotate(${Math.atan2((item.y2 ?? item.y) - item.y, (item.x2 ?? item.x) - item.x)}rad)`
                       }}
@@ -671,7 +766,8 @@ export default function HomePage() {
                         left: item.x * zoom,
                         top: item.y * zoom,
                         width: item.width * zoom,
-                        height: item.height * zoom
+                        height: item.height * zoom,
+                        borderColor: item.kind === "highlight" ? "transparent" : item.color ?? strokeColor
                       }}
                     />
                   )
@@ -684,9 +780,14 @@ export default function HomePage() {
                     key={counter.id}
                     className={`knit-counter ${counter.type}`}
                     style={{ left: counter.x * zoom, top: counter.y * zoom }}
-                    onMouseDown={(event) => startDraggingCounter(event, counter)}
                   >
                     <div className="counter-top">
+                      <button
+                        type="button"
+                        className="counter-drag-handle"
+                        onPointerDown={(event) => startDraggingCounter(event, counter)}
+                        aria-label={`Drag ${counter.label} counter`}
+                      />
                       {editingCounterId === counter.id ? (
                         <input
                           value={editingCounterTitle}
