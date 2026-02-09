@@ -268,6 +268,8 @@ export default function HomePage() {
   } | null>(null);
   const freeDrawPointsRef = useRef<Array<{ x: number; y: number }>>([]);
   const isPinchGestureRef = useRef(false);
+  const annotateScrollTrackRef = useRef<HTMLDivElement | null>(null);
+  const annotateScrollDraggingRef = useRef(false);
 
   const cancelInProgressAnnotation = useCallback(() => {
     drawingRef.current = null;
@@ -761,6 +763,35 @@ export default function HomePage() {
       window.removeEventListener("resize", sync);
     };
   }, [mode, zoom, pages.length]);
+
+  useEffect(() => {
+    function onPointerMove(event: PointerEvent) {
+      if (!annotateScrollDraggingRef.current) {
+        return;
+      }
+      const track = annotateScrollTrackRef.current;
+      const viewer = viewerRef.current;
+      if (!track || !viewer) {
+        return;
+      }
+      const rect = track.getBoundingClientRect();
+      const ratio = clamp((event.clientY - rect.top) / rect.height, 0, 1);
+      viewer.scrollTop = ratio * Math.max(0, viewer.scrollHeight - viewer.clientHeight);
+      setAnnotateScrollValue(viewer.scrollTop);
+      event.preventDefault();
+    }
+
+    function onPointerUp() {
+      annotateScrollDraggingRef.current = false;
+    }
+
+    window.addEventListener("pointermove", onPointerMove);
+    window.addEventListener("pointerup", onPointerUp);
+    return () => {
+      window.removeEventListener("pointermove", onPointerMove);
+      window.removeEventListener("pointerup", onPointerUp);
+    };
+  }, []);
 
   useEffect(() => {
     const ids = new Set(counters.map((counter) => counter.id));
@@ -1507,21 +1538,33 @@ export default function HomePage() {
       ) : null}
       {mode === "highlight" ? (
         <div className="annotate-scrollbar-wrap" aria-label="Annotate mode scroll">
-          <input
-            type="range"
-            className="annotate-scrollbar"
-            min={0}
-            max={Math.max(0, Math.round(annotateScrollMax))}
-            value={Math.min(Math.round(annotateScrollValue), Math.max(0, Math.round(annotateScrollMax)))}
-            onChange={(event) => {
+          <div
+            className="annotate-scrollbar-track"
+            ref={annotateScrollTrackRef}
+            onPointerDown={(event) => {
+              const track = annotateScrollTrackRef.current;
               const viewer = viewerRef.current;
-              if (!viewer) {
+              if (!track || !viewer) {
                 return;
               }
-              viewer.scrollTop = Number(event.target.value);
-              setAnnotateScrollValue(Number(event.target.value));
+              annotateScrollDraggingRef.current = true;
+              const rect = track.getBoundingClientRect();
+              const ratio = clamp((event.clientY - rect.top) / rect.height, 0, 1);
+              viewer.scrollTop = ratio * Math.max(0, viewer.scrollHeight - viewer.clientHeight);
+              setAnnotateScrollValue(viewer.scrollTop);
+              event.preventDefault();
             }}
-          />
+          >
+            <div
+              className="annotate-scrollbar-thumb"
+              style={{
+                top:
+                  annotateScrollMax > 0
+                    ? `${(annotateScrollValue / annotateScrollMax) * 100}%`
+                    : "0%"
+              }}
+            />
+          </div>
         </div>
       ) : null}
 

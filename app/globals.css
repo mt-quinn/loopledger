@@ -54,8 +54,8 @@
   background: #7bb5e8;
 }
 
-[data-theme="dark"] .annotate-scrollbar {
-  accent-color: #7bb5e8;
+[data-theme="dark"] .annotate-scrollbar-thumb {
+  background: #7bb5e8;
 }
 
 * {
@@ -123,15 +123,27 @@ body {
   z-index: 21;
   display: flex;
   align-items: center;
-  pointer-events: none;
+  pointer-events: auto;
 }
 
-.annotate-scrollbar {
-  pointer-events: auto;
-  -webkit-appearance: slider-vertical;
-  width: 1.15rem;
+.annotate-scrollbar-track {
+  position: relative;
+  width: 0.95rem;
   height: min(70vh, 38rem);
-  accent-color: #2d7f56;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: var(--btn-bg);
+}
+
+.annotate-scrollbar-thumb {
+  position: absolute;
+  left: 50%;
+  width: 1.4rem;
+  height: 2.1rem;
+  transform: translate(-50%, -50%);
+  border-radius: 999px;
+  background: #2d7f56;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.26);
 }
 
 .color-picker-wrap {
@@ -341,7 +353,7 @@ body {
 }
 
 .pdf-viewer.annotate-mode {
-  overflow: hidden;
+  overflow: auto;
   touch-action: none;
 }
 
