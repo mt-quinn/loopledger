@@ -54,6 +54,7 @@ type ReferenceCapture = {
 };
 
 const STORAGE_KEY = "whichstitch-pdf-workspace-v1";
+const THEME_KEY = "whichstitch-theme-v1";
 const MIN_ZOOM = 0.5;
 const MAX_ZOOM = 10;
 const COUNTER_HITBOX_WIDTH = 150;
@@ -170,6 +171,7 @@ function findOpenCounterPosition(
 }
 
 export default function HomePage() {
+  const [theme, setTheme] = useState<"light" | "dark">("light");
   const [pdfDoc, setPdfDoc] = useState<PDFDocumentProxy | null>(null);
   const [pdfFileName, setPdfFileName] = useState("No PDF loaded");
   const [pages, setPages] = useState<PageMetric[]>([]);
@@ -237,6 +239,18 @@ export default function HomePage() {
   useEffect(() => {
     GlobalWorkerOptions.workerSrc = "https://unpkg.com/pdfjs-dist@4.10.38/build/pdf.worker.min.mjs";
   }, []);
+
+  useEffect(() => {
+    const stored = window.localStorage.getItem(THEME_KEY);
+    if (stored === "dark" || stored === "light") {
+      setTheme(stored);
+    }
+  }, []);
+
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme;
+    window.localStorage.setItem(THEME_KEY, theme);
+  }, [theme]);
 
   useEffect(() => {
     // Keep browser-level pinch zoom disabled so the fixed toolbar stays in screen space.
@@ -1062,6 +1076,15 @@ export default function HomePage() {
         </div>
 
         <div className="toolbar-right">
+          <button
+            type="button"
+            className={theme === "dark" ? "toolbar-btn active theme-toggle" : "toolbar-btn theme-toggle"}
+            onClick={() => setTheme((prev) => (prev === "dark" ? "light" : "dark"))}
+            aria-label="Toggle dark mode"
+            title="Toggle dark mode"
+          >
+            ☾
+          </button>
           <span className="status-chip">{pdfFileName}</span>
           <label className="zoom-wrap">
             Zoom

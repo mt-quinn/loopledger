@@ -5,7 +5,34 @@
   --muted: #4d5a50;
   --line: #bcc8bd;
   --accent: #1f5f40;
+  --btn-bg: #f6faf4;
+  --btn-bg-press: #e8f1ea;
+  --chip-bg: #f5faf4;
+  --viewer-bg: #e7ece5;
+  --page-border: #b6c0b6;
+  --counter-bg: rgba(241, 248, 241, 0.95);
+  --counter-line: #8ba997;
+  --input-bg: #fff;
+  --shadow: rgba(23, 36, 27, 0.18);
   --accent-soft: rgba(41, 126, 80, 0.2);
+}
+
+[data-theme="dark"] {
+  --bg: #0f1512;
+  --panel: rgba(18, 27, 22, 0.94);
+  --ink: #e7efe8;
+  --muted: #a9bbb0;
+  --line: #3a4a41;
+  --accent: #6fe59d;
+  --btn-bg: #1a241f;
+  --btn-bg-press: #223129;
+  --chip-bg: #16211c;
+  --viewer-bg: #111914;
+  --page-border: #3b4a42;
+  --counter-bg: rgba(25, 37, 30, 0.96);
+  --counter-line: #5b7f6a;
+  --input-bg: #101712;
+  --shadow: rgba(0, 0, 0, 0.5);
 }
 
 * {
@@ -71,7 +98,7 @@ body {
   gap: 0.4rem;
   border: 1px solid var(--line);
   border-radius: 10px;
-  background: #f6faf4;
+  background: var(--btn-bg);
   color: var(--muted);
   font-size: 0.84rem;
   font-weight: 600;
@@ -110,7 +137,7 @@ body {
 .file-btn {
   border: 1px solid var(--line);
   border-radius: 10px;
-  background: #f6faf4;
+  background: var(--btn-bg);
   color: var(--ink);
   padding: 0.42rem 0.7rem;
   min-height: 2.3rem;
@@ -121,7 +148,7 @@ body {
 .toolbar-btn:active,
 .file-btn:active {
   transform: scale(0.97);
-  background: #e8f1ea;
+  background: var(--btn-bg-press);
   border-color: #8ea796;
 }
 
@@ -180,8 +207,8 @@ body {
   padding: 0.35rem;
   border: 1px solid #aebcad;
   border-radius: 10px;
-  background: #f6faf4;
-  box-shadow: 0 8px 20px rgba(23, 36, 27, 0.18);
+  background: var(--btn-bg);
+  box-shadow: 0 8px 20px var(--shadow);
   max-width: 92vw;
   max-height: 80vh;
   overflow: auto;
@@ -203,7 +230,7 @@ body {
   width: 100%;
   border: 1px solid #b7c3b7;
   border-radius: 8px;
-  background: #fff;
+  background: var(--input-bg);
   color: #2a362d;
   min-height: 2rem;
   font-weight: 700;
@@ -212,7 +239,7 @@ body {
 .status-chip {
   border: 1px solid var(--line);
   border-radius: 999px;
-  background: #f5faf4;
+  background: var(--chip-bg);
   padding: 0.28rem 0.62rem;
   font-size: 0.84rem;
   color: var(--muted);
@@ -228,7 +255,7 @@ body {
   gap: 0.45rem;
   border: 1px solid var(--line);
   border-radius: 10px;
-  background: #f6faf4;
+  background: var(--btn-bg);
   padding: 0.3rem 0.5rem;
   font-size: 0.84rem;
   color: var(--muted);
@@ -244,7 +271,7 @@ body {
   height: 100%;
   border: 0;
   border-radius: 0;
-  background: #e7ece5;
+  background: var(--viewer-bg);
   overflow: auto;
   padding: 3.85rem 0.75rem 0.75rem;
   display: grid;
@@ -283,7 +310,7 @@ body {
 .empty-state {
   border: 1px dashed var(--line);
   border-radius: 12px;
-  background: #f6faf4;
+  background: var(--btn-bg);
   color: var(--muted);
   text-align: center;
   padding: 2rem;
@@ -292,9 +319,9 @@ body {
 .pdf-page {
   position: relative;
   margin: 0 auto;
-  border: 1px solid #b6c0b6;
+  border: 1px solid var(--page-border);
   background: #fff;
-  box-shadow: 0 8px 20px rgba(23, 36, 27, 0.18);
+  box-shadow: 0 8px 20px var(--shadow);
 }
 
 .pdf-canvas {
@@ -340,10 +367,10 @@ body {
 
 .knit-counter {
   position: absolute;
-  border: 1px solid #8ba997;
+  border: 1px solid var(--counter-line);
   border-radius: 10px;
-  background: rgba(241, 248, 241, 0.95);
-  box-shadow: 0 4px 14px rgba(18, 30, 22, 0.2);
+  background: var(--counter-bg);
+  box-shadow: 0 4px 14px var(--shadow);
   padding: 0.46rem;
   user-select: none;
   touch-action: none;
@@ -365,7 +392,7 @@ body {
   width: 5.4rem;
   border: 1px solid #c3cec4;
   border-radius: 8px;
-  background: #fff;
+  background: var(--input-bg);
   color: var(--ink);
   font-size: 1.06rem;
   font-weight: 800;
@@ -442,7 +469,7 @@ body {
   width: 6.2rem;
   border: 1px solid #c3cec4;
   border-radius: 8px;
-  background: #fff;
+  background: var(--input-bg);
   color: var(--ink);
   font-size: 0.74rem;
   font-weight: 700;
@@ -452,7 +479,7 @@ body {
 .counter-close {
   border: 1px solid #bcc8bd;
   border-radius: 6px;
-  background: #fff;
+  background: var(--input-bg);
   color: #4f5b52;
   width: 1.45rem;
   height: 1.45rem;
@@ -477,7 +504,7 @@ body {
 .counter-buttons button {
   border: 1px solid #bcc8bd;
   border-radius: 7px;
-  background: #fff;
+  background: var(--input-bg);
   min-width: 3.1rem;
   height: 2.4rem;
   padding: 0.26rem 0.42rem;
@@ -491,6 +518,14 @@ body {
   transform: scale(0.95);
   background: #e9f2eb;
   border-color: #8ea796;
+}
+
+.theme-toggle {
+  width: 2.4rem;
+  min-width: 2.4rem;
+  padding: 0;
+  font-size: 1.05rem;
+  line-height: 1;
 }
 
 @media (max-width: 900px) {
