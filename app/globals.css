@@ -35,6 +35,25 @@
   --shadow: rgba(0, 0, 0, 0.5);
 }
 
+[data-theme="dark"] .connection-line {
+  stroke: #7bb5e8;
+  filter: drop-shadow(0 0 2px rgba(123, 181, 232, 0.35));
+}
+
+[data-theme="dark"] .connection-arrow {
+  fill: #7bb5e8;
+}
+
+[data-theme="dark"] .counter-node {
+  border-color: #5a86aa;
+  background: #1a2a37;
+  color: #bcd4e8;
+}
+
+[data-theme="dark"] .node-dot {
+  background: #7bb5e8;
+}
+
 * {
   box-sizing: border-box;
 }
@@ -334,6 +353,32 @@ body {
   isolation: isolate;
 }
 
+.connection-layer {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+
+.connection-line {
+  fill: none;
+  stroke: #2f6da8;
+  stroke-width: 2.75;
+  stroke-linecap: round;
+  opacity: 0.95;
+  filter: drop-shadow(0 0 2px rgba(22, 77, 133, 0.35));
+}
+
+.connection-line.draft {
+  stroke-dasharray: 6 6;
+  opacity: 0.85;
+}
+
+.connection-arrow {
+  fill: #2f6da8;
+}
+
 .highlight-box {
   position: absolute;
   border: 2px solid #c62828;
@@ -378,6 +423,7 @@ body {
   min-width: 0;
   max-width: 12.5rem;
   pointer-events: auto;
+  overflow: visible;
 }
 
 .knit-counter.row {
@@ -518,6 +564,63 @@ body {
   transform: scale(0.95);
   background: #e9f2eb;
   border-color: #8ea796;
+}
+
+.counter-node {
+  position: absolute;
+  top: 50%;
+  width: 2.15rem;
+  height: 1.7rem;
+  border-radius: 10px;
+  border: 1px solid #7ca6cf;
+  background: #edf6ff;
+  transform: translate(-50%, -50%);
+  padding: 0.1rem 0.1rem 0.08rem;
+  display: grid;
+  grid-template-columns: auto auto;
+  align-items: center;
+  justify-content: center;
+  column-gap: 0.18rem;
+  row-gap: 0.02rem;
+  color: #315978;
+  box-shadow: 0 1px 4px rgba(26, 63, 99, 0.2);
+}
+
+.counter-node.input {
+  left: -1.05rem;
+}
+
+.counter-node.output {
+  left: calc(100% + 1.05rem);
+}
+
+.counter-node[data-hot="true"] {
+  border-color: #1f5f40;
+  background: #dff5e8;
+}
+
+.node-dot {
+  width: 0.35rem;
+  height: 0.35rem;
+  border-radius: 999px;
+  background: #2f6da8;
+}
+
+.counter-node[data-hot="true"] .node-dot {
+  background: #1f7a4f;
+}
+
+.node-label {
+  font-size: 0.52rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+}
+
+.node-count {
+  grid-column: 1 / span 2;
+  font-size: 0.52rem;
+  font-weight: 700;
+  opacity: 0.8;
 }
 
 .theme-toggle {

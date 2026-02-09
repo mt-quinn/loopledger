@@ -36,10 +36,17 @@ type KnitCounter = {
   value: number;
 };
 
+type CounterConnection = {
+  id: string;
+  fromCounterId: string;
+  toCounterId: string;
+};
+
 type PersistedState = {
   zoom: number;
   highlights: Annotation[];
   counters: KnitCounter[];
+  connections?: CounterConnection[];
   strokeColor?: string;
   referencesByPdf?: Record<string, ReferenceCapture>;
 };
@@ -186,6 +193,7 @@ export default function HomePage() {
   const [isSelectingReference, setIsSelectingReference] = useState(false);
   const [isReferencePopoverOpen, setIsReferencePopoverOpen] = useState(false);
   const [counters, setCounters] = useState<KnitCounter[]>([]);
+  const [connections, setConnections] = useState<CounterConnection[]>([]);
   const [editingCounterId, setEditingCounterId] = useState<string | null>(null);
   const [editingCounterTitle, setEditingCounterTitle] = useState("");
   const [loadedState, setLoadedState] = useState(false);
@@ -194,6 +202,7 @@ export default function HomePage() {
   const pageRefs = useRef<(HTMLElement | null)[]>([]);
   const viewerRef = useRef<HTMLDivElement | null>(null);
   const pagesLayerRef = useRef<HTMLDivElement | null>(null);
+  const nodeRefs = useRef<Record<string, HTMLElement | null>>({});
   const counterUndoHistoryRef = useRef<Record<string, number[]>>({});
   const touchPointsRef = useRef<Map<number, { x: number; y: number }>>(new Map());
   const pinchStateRef = useRef<{
@@ -234,6 +243,21 @@ export default function HomePage() {
     y: number;
     width: number;
     height: number;
+  } | null>(null);
+  const [draftConnection, setDraftConnection] = useState<{
+    pageIndex: number;
+    startX: number;
+    startY: number;
+    endX: number;
+    endY: number;
+  } | null>(null);
+  const [connectingFromCounterId, setConnectingFromCounterId] = useState<string | null>(null);
+  const [connectTargetCounterId, setConnectTargetCounterId] = useState<string | null>(null);
+  const connectDragRef = useRef<{
+    fromCounterId: string;
+    pageIndex: number;
+    startX: number;
+    startY: number;
   } | null>(null);
 
   useEffect(() => {
@@ -295,6 +319,9 @@ export default function HomePage() {
       if (Array.isArray(parsed.counters)) {
         setCounters(parsed.counters.map((counter) => ({ ...counter })));
       }
+      if (Array.isArray(parsed.connections)) {
+        setConnections(parsed.connections);
+      }
       if (typeof parsed.strokeColor === "string") {
         setStrokeColor(parsed.strokeColor);
       }
@@ -317,6 +344,7 @@ export default function HomePage() {
       zoom,
       highlights,
       counters,
+      connections,
       strokeColor,
       referencesByPdf
     };
@@ -331,6 +359,7 @@ export default function HomePage() {
           zoom,
           highlights,
           counters,
+          connections: [],
           strokeColor,
           referencesByPdf: {}
         };
@@ -341,7 +370,7 @@ export default function HomePage() {
         }
       }
     }
-  }, [loadedState, zoom, highlights, counters, strokeColor, referencesByPdf]);
+  }, [loadedState, zoom, highlights, counters, connections, strokeColor, referencesByPdf]);
 
   useEffect(() => {
     if (!pdfDoc || !pages.length) {
@@ -517,6 +546,30 @@ export default function HomePage() {
         return;
       }
 
+      const connecting = connectDragRef.current;
+      if (connecting) {
+        const pageElement = pageRefs.current[connecting.pageIndex];
+        const pageMetric = pages[connecting.pageIndex];
+        if (!pageElement || !pageMetric) {
+          return;
+        }
+
+        const rect = pageElement.getBoundingClientRect();
+        const endX = clamp((event.clientX - rect.left) / zoom, 0, pageMetric.width);
+        const endY = clamp((event.clientY - rect.top) / zoom, 0, pageMetric.height);
+        setDraftConnection({
+          pageIndex: connecting.pageIndex,
+          startX: connecting.startX,
+          startY: connecting.startY,
+          endX,
+          endY
+        });
+        const target = document.elementFromPoint(event.clientX, event.clientY) as HTMLElement | null;
+        const inputNode = target?.closest("[data-node-role='input']") as HTMLElement | null;
+        setConnectTargetCounterId(inputNode?.dataset.counterId ?? null);
+        return;
+      }
+
       const pan = panningRef.current;
       const viewer = viewerRef.current;
       if (pan && viewer) {
@@ -525,7 +578,7 @@ export default function HomePage() {
       }
     }
 
-    function handlePointerUp() {
+    function handlePointerUp(event: PointerEvent) {
       const drawing = drawingRef.current;
       if (drawing && mode !== "highlight" && !isSelectingReference) {
         drawingRef.current = null;
@@ -585,6 +638,32 @@ export default function HomePage() {
       panningRef.current = null;
       setDraftHighlight(null);
       setDraftReferenceRect(null);
+
+      const connecting = connectDragRef.current;
+      if (connecting) {
+        const target = document.elementFromPoint(event.clientX, event.clientY) as HTMLElement | null;
+        const inputNode = target?.closest("[data-node-role='input']") as HTMLElement | null;
+        const toCounterId = inputNode?.dataset.counterId;
+        if (toCounterId && toCounterId !== connecting.fromCounterId) {
+          setConnections((prev) => {
+            if (prev.some((item) => item.fromCounterId === connecting.fromCounterId && item.toCounterId === toCounterId)) {
+              return prev;
+            }
+            return [
+              ...prev,
+              {
+                id: `conn-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`,
+                fromCounterId: connecting.fromCounterId,
+                toCounterId
+              }
+            ];
+          });
+        }
+        connectDragRef.current = null;
+        setDraftConnection(null);
+        setConnectingFromCounterId(null);
+        setConnectTargetCounterId(null);
+      }
     }
 
     window.addEventListener("pointermove", handlePointerMove);
@@ -603,6 +682,10 @@ export default function HomePage() {
     drawingRef.current = null;
     setDraftHighlight(null);
     setDraftReferenceRect(null);
+    connectDragRef.current = null;
+    setDraftConnection(null);
+    setConnectingFromCounterId(null);
+    setConnectTargetCounterId(null);
   }, [isSelectingReference, mode]);
 
   useEffect(() => {
@@ -611,6 +694,11 @@ export default function HomePage() {
     }
     setReferenceCapture(referencesByPdf[activePdfId] ?? null);
   }, [activePdfId, referencesByPdf]);
+
+  useEffect(() => {
+    const ids = new Set(counters.map((counter) => counter.id));
+    setConnections((prev) => prev.filter((edge) => ids.has(edge.fromCounterId) && ids.has(edge.toCounterId)));
+  }, [counters]);
 
   useEffect(() => {
     function onUndoHighlightHotkey(event: KeyboardEvent) {
@@ -779,6 +867,87 @@ export default function HomePage() {
     };
   }
 
+  function getNodeCenter(counter: KnitCounter, role: "input" | "output"): { x: number; y: number } | null {
+    const node = nodeRefs.current[`${counter.id}:${role}`];
+    const pageElement = pageRefs.current[counter.pageIndex];
+    if (!node || !pageElement) {
+      return null;
+    }
+    const nodeRect = node.getBoundingClientRect();
+    const pageRect = pageElement.getBoundingClientRect();
+    return {
+      x: (nodeRect.left + nodeRect.width / 2 - pageRect.left) / zoom,
+      y: (nodeRect.top + nodeRect.height / 2 - pageRect.top) / zoom
+    };
+  }
+
+  function startConnectionDrag(event: React.PointerEvent, counter: KnitCounter) {
+    event.stopPropagation();
+    event.preventDefault();
+    const center = getNodeCenter(counter, "output");
+    if (!center) {
+      return;
+    }
+    connectDragRef.current = {
+      fromCounterId: counter.id,
+      pageIndex: counter.pageIndex,
+      startX: center.x,
+      startY: center.y
+    };
+    setConnectingFromCounterId(counter.id);
+    setConnectTargetCounterId(null);
+    setDraftConnection({
+      pageIndex: counter.pageIndex,
+      startX: center.x,
+      startY: center.y,
+      endX: center.x,
+      endY: center.y
+    });
+  }
+
+  function applyConnectedIncrement(sourceCounterId: string, amount: number) {
+    if (amount <= 0) {
+      return;
+    }
+
+    const outgoing = new Map<string, string[]>();
+    for (const connection of connections) {
+      const list = outgoing.get(connection.fromCounterId) ?? [];
+      list.push(connection.toCounterId);
+      outgoing.set(connection.fromCounterId, list);
+    }
+
+    const visited = new Set<string>([sourceCounterId]);
+    const queue = [sourceCounterId];
+    while (queue.length > 0) {
+      const id = queue.shift();
+      if (!id) {
+        continue;
+      }
+      for (const nextId of outgoing.get(id) ?? []) {
+        if (visited.has(nextId)) {
+          continue;
+        }
+        visited.add(nextId);
+        queue.push(nextId);
+      }
+    }
+
+    setCounters((prev) => {
+      return prev.map((item) => {
+        if (!visited.has(item.id)) {
+          return item;
+        }
+        const stack = counterUndoHistoryRef.current[item.id] ?? [];
+        counterUndoHistoryRef.current[item.id] = [...stack, item.value];
+        return {
+          ...item,
+          value: item.value + amount
+        };
+      });
+    });
+  }
+
   const visibleHighlights = useMemo(() => {
     if (!draftHighlight) {
       return highlights;
@@ -786,13 +955,42 @@ export default function HomePage() {
     return [...highlights, draftHighlight];
   }, [draftHighlight, highlights]);
 
+  const counterById = useMemo(() => {
+    const map = new Map<string, KnitCounter>();
+    for (const counter of counters) {
+      map.set(counter.id, counter);
+    }
+    return map;
+  }, [counters]);
+
+  const connectionStats = useMemo(() => {
+    const incoming = new Map<string, number>();
+    const outgoing = new Map<string, number>();
+    for (const connection of connections) {
+      outgoing.set(connection.fromCounterId, (outgoing.get(connection.fromCounterId) ?? 0) + 1);
+      incoming.set(connection.toCounterId, (incoming.get(connection.toCounterId) ?? 0) + 1);
+    }
+    return { incoming, outgoing };
+  }, [connections]);
+
   function setCounterValue(counterId: string, nextValue: number) {
+    const current = counters.find((item) => item.id === counterId);
+    if (!current) {
+      return;
+    }
+    const target = Math.max(0, nextValue);
+    const delta = target - current.value;
+    if (delta > 0) {
+      applyConnectedIncrement(counterId, delta);
+      return;
+    }
+
     setCounters((prev) =>
       prev.map((item) =>
         item.id === counterId
           ? {
               ...item,
-              value: Math.max(0, nextValue)
+              value: target
             }
           : item
       )
@@ -800,44 +998,53 @@ export default function HomePage() {
   }
 
   function applyCounterIncrement(counterId: string, amount: number) {
-    setCounters((prev) =>
-      prev.map((item) => {
-        if (item.id !== counterId) {
-          return item;
-        }
-
-        const nextValue = Math.max(0, item.value + amount);
-        if (nextValue === item.value) {
-          return item;
-        }
-
-        const stack = counterUndoHistoryRef.current[counterId] ?? [];
-        counterUndoHistoryRef.current[counterId] = [...stack, item.value];
-
-        return {
-          ...item,
-          value: nextValue
-        };
-      })
-    );
+    applyConnectedIncrement(counterId, amount);
   }
 
   function undoCounter(counterId: string) {
-    const stack = counterUndoHistoryRef.current[counterId] ?? [];
-    if (!stack.length) {
+    const outgoing = new Map<string, string[]>();
+    for (const connection of connections) {
+      const list = outgoing.get(connection.fromCounterId) ?? [];
+      list.push(connection.toCounterId);
+      outgoing.set(connection.fromCounterId, list);
+    }
+
+    const visited = new Set<string>([counterId]);
+    const queue = [counterId];
+    while (queue.length > 0) {
+      const id = queue.shift();
+      if (!id) {
+        continue;
+      }
+      for (const nextId of outgoing.get(id) ?? []) {
+        if (visited.has(nextId)) {
+          continue;
+        }
+        visited.add(nextId);
+        queue.push(nextId);
+      }
+    }
+
+    const hasUndo = Array.from(visited).some((id) => (counterUndoHistoryRef.current[id] ?? []).length > 0);
+    if (!hasUndo) {
       return;
     }
 
-    const previousValue = stack[stack.length - 1];
-    counterUndoHistoryRef.current[counterId] = stack.slice(0, -1);
-
     setCounters((prev) =>
       prev.map((item) =>
-        item.id === counterId
-          ? {
-              ...item,
-              value: previousValue
-            }
+        visited.has(item.id)
+          ? (() => {
+              const stack = counterUndoHistoryRef.current[item.id] ?? [];
+              if (!stack.length) {
+                return item;
+              }
+              const previousValue = stack[stack.length - 1];
+              counterUndoHistoryRef.current[item.id] = stack.slice(0, -1);
+              return {
+                ...item,
+                value: previousValue
+              };
+            })()
           : item
       )
     );
@@ -1181,6 +1388,50 @@ export default function HomePage() {
               />
 
             <div className="overlay-layer" onPointerDown={(event) => pageOverlayPointerDown(event, pageIndex)}>
+              <svg className="connection-layer" viewBox={`0 0 ${page.width * zoom} ${page.height * zoom}`} preserveAspectRatio="none">
+                <defs>
+                  <marker id="conn-arrow" markerWidth="8" markerHeight="8" refX="6.5" refY="4" orient="auto">
+                    <path d="M0,0 L8,4 L0,8 Z" className="connection-arrow" />
+                  </marker>
+                </defs>
+                {connections.map((connection) => {
+                  const fromCounter = counterById.get(connection.fromCounterId);
+                  const toCounter = counterById.get(connection.toCounterId);
+                  if (!fromCounter || !toCounter) {
+                    return null;
+                  }
+                  if (fromCounter.pageIndex !== pageIndex || toCounter.pageIndex !== pageIndex) {
+                    return null;
+                  }
+
+                  const from = getNodeCenter(fromCounter, "output");
+                  const to = getNodeCenter(toCounter, "input");
+                  if (!from || !to) {
+                    return null;
+                  }
+
+                  const sx = from.x * zoom;
+                  const sy = from.y * zoom;
+                  const ex = to.x * zoom;
+                  const ey = to.y * zoom;
+                  const cx = Math.max(24, Math.abs(ex - sx) * 0.38);
+                  const d = `M ${sx} ${sy} C ${sx + cx} ${sy}, ${ex - cx} ${ey}, ${ex} ${ey}`;
+
+                  return <path key={connection.id} d={d} className="connection-line" markerEnd="url(#conn-arrow)" />;
+                })}
+                {draftConnection && draftConnection.pageIndex === pageIndex ? (
+                  (() => {
+                    const sx = draftConnection.startX * zoom;
+                    const sy = draftConnection.startY * zoom;
+                    const ex = draftConnection.endX * zoom;
+                    const ey = draftConnection.endY * zoom;
+                    const cx = Math.max(24, Math.abs(ex - sx) * 0.38);
+                    const d = `M ${sx} ${sy} C ${sx + cx} ${sy}, ${ex - cx} ${ey}, ${ex} ${ey}`;
+                    return <path d={d} className="connection-line draft" markerEnd="url(#conn-arrow)" />;
+                  })()
+                ) : null}
+              </svg>
+
               {draftReferenceRect && draftReferenceRect.pageIndex === pageIndex ? (
                 <div
                   className="reference-selection"
@@ -1270,6 +1521,9 @@ export default function HomePage() {
                         className="counter-close"
                         onClick={() => {
                           setCounters((prev) => prev.filter((item) => item.id !== counter.id));
+                          setConnections((prev) =>
+                            prev.filter((item) => item.fromCounterId !== counter.id && item.toCounterId !== counter.id)
+                          );
                           delete counterUndoHistoryRef.current[counter.id];
                         }}
                         aria-label={`Remove ${counter.label} counter`}
@@ -1313,6 +1567,37 @@ export default function HomePage() {
                         +10
                       </button>
                     </div>
+                    <button
+                      type="button"
+                      data-node-role="input"
+                      data-counter-id={counter.id}
+                      data-hot={connectTargetCounterId === counter.id ? "true" : "false"}
+                      className="counter-node input"
+                      ref={(node) => {
+                        nodeRefs.current[`${counter.id}:input`] = node;
+                      }}
+                      aria-label={`${counter.label} input node`}
+                    >
+                      <span className="node-dot" />
+                      <span className="node-label">IN</span>
+                      <span className="node-count">{connectionStats.incoming.get(counter.id) ?? 0}</span>
+                    </button>
+                    <button
+                      type="button"
+                      data-node-role="output"
+                      data-counter-id={counter.id}
+                      data-hot={connectingFromCounterId === counter.id ? "true" : "false"}
+                      className="counter-node output"
+                      ref={(node) => {
+                        nodeRefs.current[`${counter.id}:output`] = node;
+                      }}
+                      onPointerDown={(event) => startConnectionDrag(event, counter)}
+                      aria-label={`${counter.label} output node`}
+                    >
+                      <span className="node-dot" />
+                      <span className="node-label">OUT</span>
+                      <span className="node-count">{connectionStats.outgoing.get(counter.id) ?? 0}</span>
+                    </button>
                   </div>
                 ))}
             </div>
