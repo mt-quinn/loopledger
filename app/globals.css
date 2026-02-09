@@ -252,6 +252,12 @@ body {
   align-content: start;
 }
 
+.pdf-pages-layer {
+  display: grid;
+  gap: 0.7rem;
+  align-content: start;
+}
+
 .pdf-viewer.highlight-tools-open {
   padding-top: 7.1rem;
 }

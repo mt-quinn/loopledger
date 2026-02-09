@@ -170,6 +170,7 @@ export default function HomePage() {
   const canvasRefs = useRef<(HTMLCanvasElement | null)[]>([]);
   const pageRefs = useRef<(HTMLElement | null)[]>([]);
   const viewerRef = useRef<HTMLDivElement | null>(null);
+  const pagesLayerRef = useRef<HTMLDivElement | null>(null);
   const counterUndoHistoryRef = useRef<Record<string, number[]>>({});
   const touchPointsRef = useRef<Map<number, { x: number; y: number }>>(new Map());
   const pinchStateRef = useRef<{
@@ -177,6 +178,9 @@ export default function HomePage() {
     startZoom: number;
     anchorContentX: number;
     anchorContentY: number;
+    midpointClientX: number;
+    midpointClientY: number;
+    lastZoom: number;
   } | null>(null);
 
   const drawingRef = useRef<{
@@ -383,6 +387,12 @@ export default function HomePage() {
     function handlePointerMove(event: PointerEvent) {
       const drawing = drawingRef.current;
       if (drawing) {
+        if (mode !== "highlight" && !isSelectingReference) {
+          drawingRef.current = null;
+          setDraftHighlight(null);
+          setDraftReferenceRect(null);
+          return;
+        }
         event.preventDefault();
         const pageElement = pageRefs.current[drawing.pageIndex];
         if (!pageElement) {
@@ -480,6 +490,15 @@ export default function HomePage() {
 
     function handlePointerUp() {
       const drawing = drawingRef.current;
+      if (drawing && mode !== "highlight" && !isSelectingReference) {
+        drawingRef.current = null;
+        setDraftHighlight(null);
+        setDraftReferenceRect(null);
+        draggingCounterRef.current = null;
+        panningRef.current = null;
+        return;
+      }
+
       if (drawing?.tool === "reference" && draftReferenceRect && draftReferenceRect.width > 12 && draftReferenceRect.height > 12) {
         const imageDataUrl = captureReferenceImage(
           draftReferenceRect.pageIndex,
@@ -531,7 +550,16 @@ export default function HomePage() {
       window.removeEventListener("pointermove", handlePointerMove);
       window.removeEventListener("pointerup", handlePointerUp);
     };
-  }, [captureReferenceImage, counters, draftHighlight, draftReferenceRect, pages, strokeColor, zoom]);
+  }, [captureReferenceImage, counters, draftHighlight, draftReferenceRect, isSelectingReference, mode, pages, strokeColor, zoom]);
+
+  useEffect(() => {
+    if (mode === "highlight" || isSelectingReference) {
+      return;
+    }
+    drawingRef.current = null;
+    setDraftHighlight(null);
+    setDraftReferenceRect(null);
+  }, [isSelectingReference, mode]);
 
   useEffect(() => {
     function onUndoHighlightHotkey(event: KeyboardEvent) {
@@ -833,7 +861,10 @@ export default function HomePage() {
       startDistance: distance,
       startZoom: zoom,
       anchorContentX: contentX / zoom,
-      anchorContentY: contentY / zoom
+      anchorContentY: contentY / zoom,
+      midpointClientX: midpointX,
+      midpointClientY: midpointY,
+      lastZoom: zoom
     };
   }
 
@@ -867,16 +898,28 @@ export default function HomePage() {
 
     event.preventDefault();
     const nextZoom = clamp((distance / pinch.startDistance) * pinch.startZoom, MIN_ZOOM, MAX_ZOOM);
-    if (Math.abs(nextZoom - zoom) < 0.001) {
+    if (Math.abs(nextZoom - pinch.lastZoom) < 0.001) {
       return;
     }
 
-    setZoom(nextZoom);
-    const rect = viewer.getBoundingClientRect();
     const midpointX = (p1.x + p2.x) / 2;
     const midpointY = (p1.y + p2.y) / 2;
-    viewer.scrollLeft = pinch.anchorContentX * nextZoom - (midpointX - rect.left);
-    viewer.scrollTop = pinch.anchorContentY * nextZoom - (midpointY - rect.top);
+    pinchStateRef.current = {
+      ...pinch,
+      midpointClientX: midpointX,
+      midpointClientY: midpointY,
+      lastZoom: nextZoom
+    };
+
+    const layer = pagesLayerRef.current;
+    if (!layer) {
+      return;
+    }
+
+    const previewScale = nextZoom / pinch.startZoom;
+    layer.style.transformOrigin = `${pinch.anchorContentX * pinch.startZoom}px ${pinch.anchorContentY * pinch.startZoom}px`;
+    layer.style.transform = `scale(${previewScale})`;
+    layer.style.willChange = "transform";
   }
 
   function handleViewerPointerEnd(event: React.PointerEvent<HTMLDivElement>) {
@@ -885,6 +928,19 @@ export default function HomePage() {
     }
     touchPointsRef.current.delete(event.pointerId);
     if (touchPointsRef.current.size < 2) {
+      const pinch = pinchStateRef.current;
+      const viewer = viewerRef.current;
+      const layer = pagesLayerRef.current;
+      if (pinch && viewer && layer) {
+        layer.style.transform = "";
+        layer.style.transformOrigin = "";
+        layer.style.willChange = "";
+
+        setZoom(pinch.lastZoom);
+        const rect = viewer.getBoundingClientRect();
+        viewer.scrollLeft = pinch.anchorContentX * pinch.lastZoom - (pinch.midpointClientX - rect.left);
+        viewer.scrollTop = pinch.anchorContentY * pinch.lastZoom - (pinch.midpointClientY - rect.top);
+      }
       pinchStateRef.current = null;
     }
   }
@@ -1032,21 +1088,22 @@ export default function HomePage() {
       >
         {!pdfDoc ? <div className="empty-state">Load a PDF to start marking your knitting pattern.</div> : null}
 
-        {pages.map((page, pageIndex) => (
-          <article
-            key={`page-${pageIndex}`}
-            className="pdf-page"
-            style={{ width: page.width * zoom, height: page.height * zoom }}
-            ref={(node) => {
-              pageRefs.current[pageIndex] = node;
-            }}
-          >
-            <canvas
+        <div className="pdf-pages-layer" ref={pagesLayerRef}>
+          {pages.map((page, pageIndex) => (
+            <article
+              key={`page-${pageIndex}`}
+              className="pdf-page"
+              style={{ width: page.width * zoom, height: page.height * zoom }}
               ref={(node) => {
-                canvasRefs.current[pageIndex] = node;
+                pageRefs.current[pageIndex] = node;
               }}
-              className="pdf-canvas"
-            />
+            >
+              <canvas
+                ref={(node) => {
+                  canvasRefs.current[pageIndex] = node;
+                }}
+                className="pdf-canvas"
+              />
 
             <div className="overlay-layer" onPointerDown={(event) => pageOverlayPointerDown(event, pageIndex)}>
               {draftReferenceRect && draftReferenceRect.pageIndex === pageIndex ? (
@@ -1184,8 +1241,9 @@ export default function HomePage() {
                   </div>
                 ))}
             </div>
-          </article>
-        ))}
+            </article>
+          ))}
+        </div>
       </section>
     </main>
   );
