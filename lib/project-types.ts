@@ -40,6 +40,18 @@ export type CounterConnection = {
   toCounterId: string;
 };
 
+export type GaugeConversionDirection = "patternToObserved" | "observedToPattern";
+
+export type GaugeCalculatorState = {
+  patternRowsPerInch: string;
+  patternStitchesPerInch: string;
+  observedRowsPerInch: string;
+  observedStitchesPerInch: string;
+  direction: GaugeConversionDirection;
+  rowInput: string;
+  stitchInput: string;
+};
+
 export type ReferenceCapture = {
   pageIndex: number;
   x: number;
@@ -56,6 +68,7 @@ export type ProjectWorkspace = {
   connections: CounterConnection[];
   referenceCapture: ReferenceCapture | null;
   strokeColor: string;
+  calculator: GaugeCalculatorState;
 };
 
 export type ProjectMetadata = {
@@ -118,6 +131,18 @@ export const STROKE_PALETTE = [
   "#ff4081"
 ];
 
+export function createDefaultGaugeCalculator(): GaugeCalculatorState {
+  return {
+    patternRowsPerInch: "",
+    patternStitchesPerInch: "",
+    observedRowsPerInch: "",
+    observedStitchesPerInch: "",
+    direction: "patternToObserved",
+    rowInput: "",
+    stitchInput: ""
+  };
+}
+
 export function createDefaultWorkspace(): ProjectWorkspace {
   return {
     zoom: 1.1,
@@ -125,6 +150,7 @@ export function createDefaultWorkspace(): ProjectWorkspace {
     counters: [],
     connections: [],
     referenceCapture: null,
-    strokeColor: DEFAULT_STROKE_COLOR
+    strokeColor: DEFAULT_STROKE_COLOR,
+    calculator: createDefaultGaugeCalculator()
   };
 }

@@ -18,11 +18,13 @@ import {
   type CounterType,
   type DrawTool,
   type DrawingTool,
+  type GaugeCalculatorState,
   type KnitCounter,
   type PageMetric,
   type ProjectRecord,
   type ReferenceCapture,
-  type ViewerMode
+  type ViewerMode,
+  createDefaultGaugeCalculator
 } from "../../../lib/project-types";
 import { useStoredTheme } from "../../../lib/use-stored-theme";
 
@@ -130,6 +132,72 @@ function downloadProjectBackupFile(fileName: string, content: string): void {
   URL.revokeObjectURL(url);
 }
 
+type PopoverLayout = {
+  left: number;
+  top: number;
+  width: number;
+  maxHeight: number;
+};
+
+function getPopoverLayout(
+  rect: DOMRect,
+  options: {
+    desiredWidth: number;
+    preferredHeight: number;
+    minHeight?: number;
+    align?: "left" | "right";
+  }
+): PopoverLayout {
+  const viewportPadding = 12;
+  const gap = 10;
+  const width = Math.min(options.desiredWidth, window.innerWidth - viewportPadding * 2);
+  const left =
+    options.align === "right"
+      ? clamp(rect.right - width, viewportPadding, Math.max(viewportPadding, window.innerWidth - width - viewportPadding))
+      : clamp(rect.left, viewportPadding, Math.max(viewportPadding, window.innerWidth - width - viewportPadding));
+
+  const spaceBelow = Math.max(0, window.innerHeight - rect.bottom - gap - viewportPadding);
+  const spaceAbove = Math.max(0, rect.top - gap - viewportPadding);
+  const preferredHeight = options.preferredHeight;
+  const minHeight = options.minHeight ?? Math.min(160, preferredHeight);
+  const openAbove = spaceAbove > spaceBelow && spaceBelow < preferredHeight;
+  const maxHeight = Math.max(minHeight, openAbove ? spaceAbove : spaceBelow);
+  const top = openAbove ? Math.max(viewportPadding, rect.top - gap - Math.min(preferredHeight, maxHeight)) : rect.bottom + gap;
+
+  return {
+    left,
+    top,
+    width,
+    maxHeight
+  };
+}
+
+function parseGaugeNumber(value: string): number | null {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return null;
+  }
+
+  const parsed = Number(trimmed);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+}
+
+function parseCountInput(value: string): number | null {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return null;
+  }
+
+  const parsed = Number(trimmed);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function formatConvertedCount(value: number): string {
+  return new Intl.NumberFormat("en-US", {
+    maximumFractionDigits: Math.abs(value - Math.round(value)) < 0.005 ? 0 : 2
+  }).format(value);
+}
+
 export default function ProjectEditorPage({
   params
 }: {
@@ -149,8 +217,10 @@ export default function ProjectEditorPage({
   const [strokeColor, setStrokeColor] = useState(DEFAULT_STROKE_COLOR);
   const [highlights, setHighlights] = useState<Annotation[]>([]);
   const [referenceCapture, setReferenceCapture] = useState<ReferenceCapture | null>(null);
+  const [calculator, setCalculator] = useState<GaugeCalculatorState>(() => createDefaultGaugeCalculator());
   const [isSelectingReference, setIsSelectingReference] = useState(false);
   const [isReferencePopoverOpen, setIsReferencePopoverOpen] = useState(false);
+  const [isCalculatorPopoverOpen, setIsCalculatorPopoverOpen] = useState(false);
   const [isZoomPopoverOpen, setIsZoomPopoverOpen] = useState(false);
   const [counters, setCounters] = useState<KnitCounter[]>([]);
   const [connections, setConnections] = useState<CounterConnection[]>([]);
@@ -172,7 +242,16 @@ export default function ProjectEditorPage({
     left: number;
     top: number;
     width: number;
+    maxHeight: number;
   } | null>(null);
+  const [calculatorPopoverPosition, setCalculatorPopoverPosition] = useState<{
+    left: number;
+    top: number;
+    width: number;
+    maxHeight: number;
+  } | null>(null);
+  const [toolbarHeight, setToolbarHeight] = useState(76);
+  const [highlightToolsHeight, setHighlightToolsHeight] = useState(0);
 
   const canvasRefs = useRef<(HTMLCanvasElement | null)[]>([]);
   const pageRefs = useRef<(HTMLElement | null)[]>([]);
@@ -254,11 +333,16 @@ export default function ProjectEditorPage({
   const referenceWrapRef = useRef<HTMLDivElement | null>(null);
   const referenceButtonRef = useRef<HTMLButtonElement | null>(null);
   const referencePopoverRef = useRef<HTMLDivElement | null>(null);
+  const calculatorWrapRef = useRef<HTMLDivElement | null>(null);
+  const calculatorButtonRef = useRef<HTMLButtonElement | null>(null);
+  const calculatorPopoverRef = useRef<HTMLDivElement | null>(null);
   const zoomWrapRef = useRef<HTMLDivElement | null>(null);
   const zoomButtonRef = useRef<HTMLButtonElement | null>(null);
   const zoomPopoverRef = useRef<HTMLDivElement | null>(null);
   const titleWrapRef = useRef<HTMLDivElement | null>(null);
   const titleTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const toolbarRef = useRef<HTMLElement | null>(null);
+  const highlightSubbarRef = useRef<HTMLDivElement | null>(null);
   const hydratedWorkspaceRef = useRef(false);
   const latestWorkspaceRef = useRef({
     zoom,
@@ -266,7 +350,8 @@ export default function ProjectEditorPage({
     counters,
     connections,
     referenceCapture,
-    strokeColor
+    strokeColor,
+    calculator
   });
 
   const cancelInProgressAnnotation = useCallback(() => {
@@ -290,9 +375,10 @@ export default function ProjectEditorPage({
       counters,
       connections,
       referenceCapture,
-      strokeColor
+      strokeColor,
+      calculator
     };
-  }, [connections, counters, highlights, referenceCapture, strokeColor, zoom]);
+  }, [calculator, connections, counters, highlights, referenceCapture, strokeColor, zoom]);
 
   useEffect(() => {
     if (!isTitleTooltipOpen) {
@@ -342,12 +428,17 @@ export default function ProjectEditorPage({
         return;
       }
 
-      const maxWidth = Math.min(460, window.innerWidth - 24);
+      const layout = getPopoverLayout(rect, {
+        desiredWidth: 460,
+        preferredHeight: 360,
+        minHeight: 180,
+        align: "left"
+      });
       setReferencePopoverPosition({
-        left: clamp(rect.left, 12, Math.max(12, window.innerWidth - maxWidth - 12)),
-        top: rect.bottom + 10,
-        maxWidth,
-        maxHeight: Math.max(180, window.innerHeight - rect.bottom - 24)
+        left: layout.left,
+        top: layout.top,
+        maxWidth: layout.width,
+        maxHeight: layout.maxHeight
       });
     };
 
@@ -366,7 +457,45 @@ export default function ProjectEditorPage({
       window.removeEventListener("resize", updatePopoverPosition);
       window.removeEventListener("pointerdown", closePopoverOnOutsidePointer);
     };
-  }, [isReferencePopoverOpen, referenceCapture]);
+  }, [isReferencePopoverOpen, referenceCapture, toolbarHeight]);
+
+  useEffect(() => {
+    if (!isCalculatorPopoverOpen) {
+      setCalculatorPopoverPosition(null);
+      return;
+    }
+
+    const updatePopoverPosition = () => {
+      const rect = calculatorButtonRef.current?.getBoundingClientRect();
+      if (!rect) {
+        return;
+      }
+
+      const layout = getPopoverLayout(rect, {
+        desiredWidth: 350,
+        preferredHeight: 396,
+        minHeight: 292,
+        align: "right"
+      });
+      setCalculatorPopoverPosition(layout);
+    };
+
+    const closePopoverOnOutsidePointer = (event: PointerEvent) => {
+      const target = event.target as Node;
+      if (calculatorWrapRef.current?.contains(target) || calculatorPopoverRef.current?.contains(target)) {
+        return;
+      }
+      setIsCalculatorPopoverOpen(false);
+    };
+
+    updatePopoverPosition();
+    window.addEventListener("resize", updatePopoverPosition);
+    window.addEventListener("pointerdown", closePopoverOnOutsidePointer);
+    return () => {
+      window.removeEventListener("resize", updatePopoverPosition);
+      window.removeEventListener("pointerdown", closePopoverOnOutsidePointer);
+    };
+  }, [isCalculatorPopoverOpen, toolbarHeight]);
 
   useEffect(() => {
     if (!isZoomPopoverOpen) {
@@ -380,12 +509,13 @@ export default function ProjectEditorPage({
         return;
       }
 
-      const width = Math.min(248, window.innerWidth - 24);
-      setZoomPopoverPosition({
-        left: clamp(rect.right - width, 12, Math.max(12, window.innerWidth - width - 12)),
-        top: rect.bottom + 10,
-        width
+      const layout = getPopoverLayout(rect, {
+        desiredWidth: 248,
+        preferredHeight: 168,
+        minHeight: 140,
+        align: "right"
       });
+      setZoomPopoverPosition(layout);
     };
 
     const closePopoverOnOutsidePointer = (event: PointerEvent) => {
@@ -403,7 +533,48 @@ export default function ProjectEditorPage({
       window.removeEventListener("resize", updatePopoverPosition);
       window.removeEventListener("pointerdown", closePopoverOnOutsidePointer);
     };
-  }, [isZoomPopoverOpen, zoom]);
+  }, [isZoomPopoverOpen, toolbarHeight, zoom]);
+
+  useEffect(() => {
+    const toolbarNode = toolbarRef.current;
+    if (!toolbarNode) {
+      return;
+    }
+
+    const updateToolbarHeight = () => {
+      setToolbarHeight(Math.ceil(toolbarNode.getBoundingClientRect().height));
+    };
+
+    updateToolbarHeight();
+    const observer = new ResizeObserver(updateToolbarHeight);
+    observer.observe(toolbarNode);
+    return () => {
+      observer.disconnect();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (mode !== "highlight") {
+      setHighlightToolsHeight(0);
+      return;
+    }
+
+    const subbarNode = highlightSubbarRef.current;
+    if (!subbarNode) {
+      return;
+    }
+
+    const updateSubbarHeight = () => {
+      setHighlightToolsHeight(Math.ceil(subbarNode.getBoundingClientRect().height));
+    };
+
+    updateSubbarHeight();
+    const observer = new ResizeObserver(updateSubbarHeight);
+    observer.observe(subbarNode);
+    return () => {
+      observer.disconnect();
+    };
+  }, [mode]);
 
   useEffect(() => {
     let cancelled = false;
@@ -433,7 +604,8 @@ export default function ProjectEditorPage({
           counters: loaded.workspace.counters,
           connections: loaded.workspace.connections,
           referenceCapture: loaded.workspace.referenceCapture,
-          strokeColor: loaded.workspace.strokeColor
+          strokeColor: loaded.workspace.strokeColor,
+          calculator: loaded.workspace.calculator
         };
         setZoom(clamp(loaded.workspace.zoom, MIN_ZOOM, MAX_ZOOM));
         setStrokeColor(loaded.workspace.strokeColor);
@@ -441,6 +613,7 @@ export default function ProjectEditorPage({
         setCounters(loaded.workspace.counters.map((counter) => ({ ...counter })));
         setConnections(loaded.workspace.connections);
         setReferenceCapture(loaded.workspace.referenceCapture);
+        setCalculator(loaded.workspace.calculator);
         setProjectStatus("ready");
         setSaveStatus("saved");
         hydratedWorkspaceRef.current = true;
@@ -516,7 +689,7 @@ export default function ProjectEditorPage({
     return () => {
       window.clearTimeout(timeoutId);
     };
-  }, [connections, counters, highlights, project, referenceCapture, strokeColor, zoom]);
+  }, [calculator, connections, counters, highlights, project, referenceCapture, strokeColor, zoom]);
 
   useEffect(() => {
     if (!project) {
@@ -1300,6 +1473,42 @@ export default function ProjectEditorPage({
     return { incoming, outgoing };
   }, [connections]);
 
+  const calculatorResults = useMemo(() => {
+    const patternRowsPerInch = parseGaugeNumber(calculator.patternRowsPerInch);
+    const patternStitchesPerInch = parseGaugeNumber(calculator.patternStitchesPerInch);
+    const observedRowsPerInch = parseGaugeNumber(calculator.observedRowsPerInch);
+    const observedStitchesPerInch = parseGaugeNumber(calculator.observedStitchesPerInch);
+    const rowInput = parseCountInput(calculator.rowInput);
+    const stitchInput = parseCountInput(calculator.stitchInput);
+
+    const rowRatio =
+      patternRowsPerInch && observedRowsPerInch
+        ? calculator.direction === "patternToObserved"
+          ? observedRowsPerInch / patternRowsPerInch
+          : patternRowsPerInch / observedRowsPerInch
+        : null;
+    const stitchRatio =
+      patternStitchesPerInch && observedStitchesPerInch
+        ? calculator.direction === "patternToObserved"
+          ? observedStitchesPerInch / patternStitchesPerInch
+          : patternStitchesPerInch / observedStitchesPerInch
+        : null;
+
+    return {
+      rowValue: rowRatio !== null && rowInput !== null ? rowInput * rowRatio : null,
+      stitchValue: stitchRatio !== null && stitchInput !== null ? stitchInput * stitchRatio : null,
+      fromLabel: calculator.direction === "patternToObserved" ? "Pattern" : "Yours",
+      toLabel: calculator.direction === "patternToObserved" ? "Yours" : "Pattern"
+    };
+  }, [calculator]);
+
+  function updateCalculatorField<Field extends keyof GaugeCalculatorState>(field: Field, value: GaugeCalculatorState[Field]) {
+    setCalculator((current) => ({
+      ...current,
+      [field]: value
+    }));
+  }
+
   function setCounterValue(counterId: string, nextValue: number) {
     const current = counters.find((item) => item.id === counterId);
     if (!current) {
@@ -1465,7 +1674,18 @@ export default function ProjectEditorPage({
     setHighlights((prev) => (prev.length ? prev.slice(0, -1) : prev));
   }
 
+  function toggleCalculatorPopover() {
+    setIsReferencePopoverOpen(false);
+    setIsTitleTooltipOpen(false);
+    setIsZoomPopoverOpen(false);
+    setIsCalculatorPopoverOpen((prev) => !prev);
+  }
+
   function onReferenceButtonClick() {
+    setIsCalculatorPopoverOpen(false);
+    setIsTitleTooltipOpen(false);
+    setIsZoomPopoverOpen(false);
+
     if (isSelectingReference) {
       setIsSelectingReference(false);
       setDraftReferenceRect(null);
@@ -1626,6 +1846,10 @@ export default function ProjectEditorPage({
     }
   }
 
+  const highlightSubbarTop = toolbarHeight + 8;
+  const viewerTopPadding = toolbarHeight + (mode === "highlight" ? highlightToolsHeight + 18 : 14);
+  const annotateScrollbarTop = toolbarHeight + highlightToolsHeight + 16;
+
   if (projectStatus === "loading") {
     return (
       <main className="hub-page">
@@ -1673,9 +1897,9 @@ export default function ProjectEditorPage({
 
   return (
     <main className="pdf-app">
-      <header className="pdf-toolbar">
-        <div className="toolbar-strip">
-          <div className="toolbar-group">
+      <header ref={toolbarRef} className="pdf-toolbar">
+        <div className="toolbar-row toolbar-row-primary">
+          <div className="toolbar-group toolbar-group-primary">
             <button type="button" className="toolbar-btn toolbar-nav-btn" onClick={() => router.push("/")}>
               <span className="toolbar-nav-arrow" aria-hidden="true">
                 ←
@@ -1692,7 +1916,12 @@ export default function ProjectEditorPage({
                 ref={titleTriggerRef}
                 type="button"
                 className="status-chip toolbar-project-chip toolbar-title-trigger"
-                onClick={() => setIsTitleTooltipOpen((current) => !current)}
+                onClick={() => {
+                  setIsReferencePopoverOpen(false);
+                  setIsCalculatorPopoverOpen(false);
+                  setIsZoomPopoverOpen(false);
+                  setIsTitleTooltipOpen((current) => !current);
+                }}
                 onFocus={() => setIsTitleTooltipOpen(true)}
                 onBlur={() => setIsTitleTooltipOpen(false)}
                 aria-expanded={isTitleTooltipOpen}
@@ -1703,7 +1932,9 @@ export default function ProjectEditorPage({
               </button>
             </div>
           </div>
+        </div>
 
+        <div className="toolbar-row toolbar-row-secondary">
           <div className="toolbar-group toolbar-group-mode">
             <button
               type="button"
@@ -1721,7 +1952,7 @@ export default function ProjectEditorPage({
             </button>
           </div>
 
-          <div className="toolbar-group">
+          <div className="toolbar-group toolbar-group-actions">
             <div ref={referenceWrapRef} className="reference-wrap">
               <button
                 ref={referenceButtonRef}
@@ -1745,12 +1976,41 @@ export default function ProjectEditorPage({
             <button type="button" className="toolbar-btn" onClick={() => addCounter("stitch")}>
               Stitch
             </button>
-          </div>
-
-          <div className="toolbar-group toolbar-group-meta">
-            <button type="button" className="toolbar-btn" onClick={handleExportProject} disabled={isExporting}>
+            <button type="button" className="toolbar-btn toolbar-action-export" onClick={handleExportProject} disabled={isExporting}>
               {isExporting ? "Exporting..." : "Export"}
             </button>
+            <div ref={zoomWrapRef} className="zoom-wrap">
+              <button
+                ref={zoomButtonRef}
+                type="button"
+                className={isZoomPopoverOpen ? "toolbar-btn toolbar-compact-btn zoom-trigger active" : "toolbar-btn toolbar-compact-btn zoom-trigger"}
+                onClick={() => {
+                  setIsReferencePopoverOpen(false);
+                  setIsTitleTooltipOpen(false);
+                  setIsCalculatorPopoverOpen(false);
+                  setIsZoomPopoverOpen((current) => !current);
+                }}
+                aria-expanded={isZoomPopoverOpen}
+                aria-controls={isZoomPopoverOpen ? "zoom-popover" : undefined}
+              >
+                <span>Zoom</span>
+                <span className="zoom-trigger-value">{Math.round(zoom * 100)}%</span>
+              </button>
+            </div>
+          </div>
+          <div className="toolbar-group toolbar-group-primary-actions">
+            <div ref={calculatorWrapRef} className="calculator-wrap">
+              <button
+                ref={calculatorButtonRef}
+                type="button"
+                className={isCalculatorPopoverOpen ? "toolbar-btn toolbar-compact-btn active" : "toolbar-btn toolbar-compact-btn"}
+                onClick={toggleCalculatorPopover}
+                aria-expanded={isCalculatorPopoverOpen}
+                aria-controls={isCalculatorPopoverOpen ? "calculator-popover" : undefined}
+              >
+                Calculator
+              </button>
+            </div>
             <button
               type="button"
               className={theme === "dark" ? "toolbar-btn toolbar-icon-btn active" : "toolbar-btn toolbar-icon-btn"}
@@ -1762,19 +2022,6 @@ export default function ProjectEditorPage({
                 ☾
               </span>
             </button>
-            <div ref={zoomWrapRef} className="zoom-wrap">
-              <button
-                ref={zoomButtonRef}
-                type="button"
-                className={isZoomPopoverOpen ? "toolbar-btn toolbar-compact-btn zoom-trigger active" : "toolbar-btn toolbar-compact-btn zoom-trigger"}
-                onClick={() => setIsZoomPopoverOpen((current) => !current)}
-                aria-expanded={isZoomPopoverOpen}
-                aria-controls={isZoomPopoverOpen ? "zoom-popover" : undefined}
-              >
-                <span>Zoom</span>
-                <span className="zoom-trigger-value">{Math.round(zoom * 100)}%</span>
-              </button>
-            </div>
           </div>
         </div>
         {isTitleTooltipOpen && titleTooltipPosition ? (
@@ -1790,6 +2037,139 @@ export default function ProjectEditorPage({
           >
             {project.metadata.sourceFileName}
           </span>
+        ) : null}
+        {isCalculatorPopoverOpen && calculatorPopoverPosition ? (
+          <div
+            ref={calculatorPopoverRef}
+            id="calculator-popover"
+            className="calculator-popover"
+            style={{
+              left: calculatorPopoverPosition.left,
+              top: calculatorPopoverPosition.top,
+              width: calculatorPopoverPosition.width,
+              maxHeight: calculatorPopoverPosition.maxHeight
+            }}
+          >
+            <div className="calculator-head">
+              <h2 className="calculator-title">Calculator</h2>
+              <div className="calculator-head-actions">
+                <span className="calculator-direction-readout">
+                  {calculatorResults.fromLabel} to {calculatorResults.toLabel}
+                </span>
+                <button
+                  type="button"
+                  className="calculator-direction-swap"
+                  onClick={() =>
+                    updateCalculatorField(
+                      "direction",
+                      calculator.direction === "patternToObserved" ? "observedToPattern" : "patternToObserved"
+                    )
+                  }
+                  aria-label={`Swap direction. Currently ${calculatorResults.fromLabel} to ${calculatorResults.toLabel}`}
+                  title={`${calculatorResults.fromLabel} to ${calculatorResults.toLabel}`}
+                >
+                  <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                    <path d="M4 7h11" />
+                    <path d="M12 3l4 4-4 4" />
+                    <path d="M20 17H9" />
+                    <path d="M12 13l-4 4 4 4" />
+                  </svg>
+                </button>
+              </div>
+            </div>
+
+            <section className="calculator-band">
+              <div className="calculator-gauge-table">
+                <span className="calculator-table-corner" aria-hidden="true" />
+                <span className="calculator-column-label">Pattern gauge</span>
+                <span className="calculator-column-label">Your gauge</span>
+
+                <span className="calculator-axis-label">Rows / in</span>
+                <label className="calculator-mini-field">
+                  <input
+                    type="text"
+                    inputMode="decimal"
+                    value={calculator.patternRowsPerInch}
+                    onChange={(event) => updateCalculatorField("patternRowsPerInch", event.target.value)}
+                  />
+                </label>
+                <label className="calculator-mini-field">
+                  <input
+                    type="text"
+                    inputMode="decimal"
+                    value={calculator.observedRowsPerInch}
+                    onChange={(event) => updateCalculatorField("observedRowsPerInch", event.target.value)}
+                  />
+                </label>
+
+                <span className="calculator-axis-label">Stitches / in</span>
+                <label className="calculator-mini-field">
+                  <input
+                    type="text"
+                    inputMode="decimal"
+                    value={calculator.patternStitchesPerInch}
+                    onChange={(event) => updateCalculatorField("patternStitchesPerInch", event.target.value)}
+                  />
+                </label>
+                <label className="calculator-mini-field">
+                  <input
+                    type="text"
+                    inputMode="decimal"
+                    value={calculator.observedStitchesPerInch}
+                    onChange={(event) => updateCalculatorField("observedStitchesPerInch", event.target.value)}
+                  />
+                </label>
+              </div>
+            </section>
+
+            <section className="calculator-band calculator-conversions">
+              <div className="calculator-conversion-row">
+                <span className="calculator-kind-label">Rows</span>
+                <label className="calculator-compact-field">
+                  <span>{calculatorResults.fromLabel}</span>
+                  <div className="calculator-inline-input">
+                    <input
+                      type="text"
+                      inputMode="decimal"
+                      value={calculator.rowInput}
+                      onChange={(event) => updateCalculatorField("rowInput", event.target.value)}
+                    />
+                  </div>
+                </label>
+                <span className="calculator-inline-arrow" aria-hidden="true">
+                  →
+                </span>
+                <div className="calculator-inline-result">
+                  <span className="calculator-inline-result-label">{calculatorResults.toLabel}</span>
+                  <strong>{calculatorResults.rowValue !== null ? formatConvertedCount(calculatorResults.rowValue) : "--"}</strong>
+                  {calculatorResults.rowValue !== null ? <small>Round {Math.round(calculatorResults.rowValue)}</small> : null}
+                </div>
+              </div>
+
+              <div className="calculator-conversion-row">
+                <span className="calculator-kind-label">Stitches</span>
+                <label className="calculator-compact-field">
+                  <span>{calculatorResults.fromLabel}</span>
+                  <div className="calculator-inline-input">
+                    <input
+                      type="text"
+                      inputMode="decimal"
+                      value={calculator.stitchInput}
+                      onChange={(event) => updateCalculatorField("stitchInput", event.target.value)}
+                    />
+                  </div>
+                </label>
+                <span className="calculator-inline-arrow" aria-hidden="true">
+                  →
+                </span>
+                <div className="calculator-inline-result">
+                  <span className="calculator-inline-result-label">{calculatorResults.toLabel}</span>
+                  <strong>{calculatorResults.stitchValue !== null ? formatConvertedCount(calculatorResults.stitchValue) : "--"}</strong>
+                  {calculatorResults.stitchValue !== null ? <small>Round {Math.round(calculatorResults.stitchValue)}</small> : null}
+                </div>
+              </div>
+            </section>
+          </div>
         ) : null}
         {isReferencePopoverOpen && referenceCapture && referencePopoverPosition ? (
           <div
@@ -1831,7 +2211,8 @@ export default function ProjectEditorPage({
             style={{
               left: zoomPopoverPosition.left,
               top: zoomPopoverPosition.top,
-              width: zoomPopoverPosition.width
+              width: zoomPopoverPosition.width,
+              maxHeight: zoomPopoverPosition.maxHeight
             }}
           >
             <div className="zoom-popover-head">
@@ -1856,7 +2237,7 @@ export default function ProjectEditorPage({
         ) : null}
       </header>
       {mode === "highlight" ? (
-        <div className="highlight-subbar">
+        <div ref={highlightSubbarRef} className="highlight-subbar" style={{ top: highlightSubbarTop }}>
           <button
             type="button"
             className={drawTool === "rectangle" ? "toolbar-btn active" : "toolbar-btn"}
@@ -1918,7 +2299,7 @@ export default function ProjectEditorPage({
         </div>
       ) : null}
       {mode === "highlight" ? (
-        <div className="annotate-scrollbar-wrap" aria-label="Annotate mode scroll">
+        <div className="annotate-scrollbar-wrap" aria-label="Annotate mode scroll" style={{ top: annotateScrollbarTop }}>
           <div
             className="annotate-scrollbar-track"
             ref={annotateScrollTrackRef}
@@ -1956,6 +2337,7 @@ export default function ProjectEditorPage({
             : `pdf-viewer annotate-mode${mode === "highlight" ? " highlight-tools-open" : ""}`
         }
         ref={viewerRef}
+        style={{ paddingTop: viewerTopPadding }}
         onPointerDown={handleViewerPointerDown}
         onPointerMove={handleViewerPointerMove}
         onPointerUp={handleViewerPointerEnd}
