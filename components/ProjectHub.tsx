@@ -17,6 +17,7 @@ import { computeBlobFingerprint, normalizeWorkspace } from "../lib/project-store
 import type { ProjectBackup } from "../lib/project-types";
 import { useStoredTheme } from "../lib/use-stored-theme";
 import AuthForm from "./AuthForm";
+import Panel from "./ui/Panel";
 
 function downloadBackupFile(fileName: string, content: string): void {
   const blob = new Blob([content], { type: "application/json" });
@@ -68,11 +69,15 @@ function HubInner({
   const pdfInputRef = useRef<HTMLInputElement | null>(null);
   const backupInputRef = useRef<HTMLInputElement | null>(null);
   const migrationStartedRef = useRef(false);
+  const accountBtnRef = useRef<HTMLButtonElement | null>(null);
+  const cardMenuAnchorRef = useRef<HTMLButtonElement | null>(null);
 
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const [bannerMessage, setBannerMessage] = useState<string | null>(null);
   const [editingProjectId, setEditingProjectId] = useState<string | null>(null);
   const [editingProjectName, setEditingProjectName] = useState("");
+  const [accountMenuOpen, setAccountMenuOpen] = useState(false);
+  const [menuProjectId, setMenuProjectId] = useState<Id<"projects"> | null>(null);
 
   useEffect(() => {
     if (migrationStartedRef.current) {
@@ -227,9 +232,12 @@ function HubInner({
   }
 
   const hubStatus = projects === undefined ? "loading" : "ready";
+  const projectCount = projects?.length ?? 0;
+  const importBusy = busyAction === "import-pdf" || busyAction === "import-backup";
+  const menuProject = projects?.find((project) => project.id === menuProjectId) ?? null;
 
   return (
-    <section className="hub-shell">
+    <div className="hub">
       <input ref={pdfInputRef} type="file" accept="application/pdf" hidden onChange={handlePdfImport} />
       <input
         ref={backupInputRef}
@@ -239,143 +247,274 @@ function HubInner({
         onChange={handleBackupImport}
       />
 
-      <section className="hub-board">
-        <div className="hub-toolbar">
-          <div className="hub-board-head">
-            <div>
-              <p className="hub-kicker">WhichStitch</p>
-              <h1 className="hub-board-title">Projects</h1>
-            </div>
-            <p className="hub-board-meta">
-              {(projects?.length ?? 0)} {(projects?.length ?? 0) === 1 ? "project" : "projects"}
-            </p>
-          </div>
+      <header className="hub-header">
+        <div className="hub-brand">
+          <p className="hub-kicker">WhichStitch</p>
+          <h1 className="hub-title">Projects</h1>
+          <p className="hub-count">
+            {hubStatus === "loading"
+              ? "Loading your library"
+              : `${projectCount} ${projectCount === 1 ? "pattern" : "patterns"}`}
+          </p>
+        </div>
 
-          <div className="hub-actions">
+        <div className="hub-header-actions">
+          <button
+            type="button"
+            className="hub-btn hub-btn-primary"
+            onClick={() => pdfInputRef.current?.click()}
+            disabled={importBusy}
+          >
+            <span className="hub-btn-glyph" aria-hidden="true">
+              +
+            </span>
+            {busyAction === "import-pdf" ? "Importing\u2026" : "Import PDF"}
+          </button>
+          <button
+            ref={accountBtnRef}
+            type="button"
+            className="hub-btn hub-btn-icon"
+            aria-label="Account and settings"
+            aria-haspopup="dialog"
+            aria-expanded={accountMenuOpen}
+            onClick={() => setAccountMenuOpen((open) => !open)}
+          >
+            <span aria-hidden="true">{"\u2699"}</span>
+          </button>
+        </div>
+      </header>
+
+      {bannerMessage ? (
+        <div className="hub-notice" role="status">
+          <span>{bannerMessage}</span>
+          <button type="button" className="hub-notice-close" onClick={() => setBannerMessage(null)} aria-label="Dismiss">
+            ✕
+          </button>
+        </div>
+      ) : null}
+
+      {hubStatus === "loading" ? (
+        <div className="hub-grid" aria-hidden="true">
+          {Array.from({ length: 6 }).map((_, index) => (
+            <div key={index} className="hub-skeleton-card" />
+          ))}
+        </div>
+      ) : null}
+
+      {hubStatus === "ready" && projectCount === 0 ? (
+        <div className="hub-empty">
+          <div className="hub-empty-mark" aria-hidden="true">
+            🧶
+          </div>
+          <h2 className="hub-empty-title">Start your first pattern</h2>
+          <p className="hub-empty-text">
+            Import a PDF knitting pattern to mark it up, drop counters, and keep your place. Everything syncs to your
+            account automatically.
+          </p>
+          <div className="hub-empty-actions">
             <button
               type="button"
-              className="hub-primary-btn"
+              className="hub-btn hub-btn-primary"
               onClick={() => pdfInputRef.current?.click()}
-              disabled={busyAction === "import-pdf" || busyAction === "import-backup"}
+              disabled={importBusy}
             >
-              {busyAction === "import-pdf" ? "Importing PDF..." : "Import PDF"}
+              Import a PDF
             </button>
             <button
               type="button"
-              className="hub-secondary-btn"
+              className="hub-btn hub-btn-ghost"
               onClick={() => backupInputRef.current?.click()}
-              disabled={busyAction === "import-pdf" || busyAction === "import-backup"}
+              disabled={importBusy}
             >
-              {busyAction === "import-backup" ? "Restoring Backup..." : "Import Backup"}
-            </button>
-            <button
-              type="button"
-              className={theme === "dark" ? "hub-secondary-btn active" : "hub-secondary-btn"}
-              onClick={() => setTheme((current) => (current === "dark" ? "light" : "dark"))}
-            >
-              {theme === "dark" ? "Light mode" : "Dark mode"}
-            </button>
-            <button type="button" className="hub-secondary-btn" onClick={() => void signOut()}>
-              Sign out
+              {busyAction === "import-backup" ? "Restoring\u2026" : "Restore a backup"}
             </button>
           </div>
         </div>
+      ) : null}
 
-        {bannerMessage ? <p className="hub-banner">{bannerMessage}</p> : null}
+      {hubStatus === "ready" && projectCount > 0 ? (
+        <div className="hub-grid">
+          {projects!.map((project, index) => (
+            <article
+              key={project.id}
+              className="project-card"
+              style={{ animationDelay: `${Math.min(index, 8) * 55}ms` }}
+              onClick={() => {
+                if (editingProjectId !== project.id) {
+                  router.push(`/projects/${project.id}`);
+                }
+              }}
+            >
+              <div className="project-card-head">
+                <span className="project-card-badge">
+                  {project.pageCount > 0 ? `${project.pageCount} ${project.pageCount === 1 ? "page" : "pages"}` : "PDF"}
+                </span>
+                <button
+                  type="button"
+                  className="project-card-menu-btn"
+                  aria-label={`Actions for ${project.name}`}
+                  aria-haspopup="dialog"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    cardMenuAnchorRef.current = event.currentTarget;
+                    setMenuProjectId(project.id);
+                  }}
+                >
+                  <span aria-hidden="true">⋯</span>
+                </button>
+              </div>
 
-        {hubStatus === "loading" ? (
-          <div className="hub-empty">
-            <h2 className="hub-empty-title">Loading projects.</h2>
-          </div>
-        ) : null}
-
-        {hubStatus === "ready" && projects && projects.length === 0 ? (
-          <div className="hub-empty">
-            <h2 className="hub-empty-title">No projects yet.</h2>
-          </div>
-        ) : null}
-
-        {hubStatus === "ready" && projects && projects.length > 0 ? (
-          <div className="hub-project-grid">
-            {projects.map((project, index) => (
-              <article
-                key={project.id}
-                className="hub-project-card"
-                style={{ animationDelay: `${index * 70}ms` }}
-                onClick={() => router.push(`/projects/${project.id}`)}
-              >
-                <div className="hub-project-top">
-                  <p className="hub-project-index">{String(index + 1).padStart(2, "0")}</p>
-                  <p className="hub-project-badge">{project.pageCount > 0 ? `${project.pageCount} pages` : "PDF"}</p>
-                </div>
-
-                <div className="hub-project-body">
-                  {editingProjectId === project.id ? (
-                    <input
-                      value={editingProjectName}
-                      className="hub-project-name-input"
-                      autoFocus
-                      onClick={(event) => event.stopPropagation()}
-                      onChange={(event) => setEditingProjectName(event.target.value)}
-                      onBlur={() => void commitRename(project.id)}
-                      onKeyDown={(event) => {
-                        if (event.key === "Enter") {
-                          void commitRename(project.id);
-                        }
-                        if (event.key === "Escape") {
-                          setEditingProjectId(null);
-                          setEditingProjectName("");
-                        }
-                      }}
-                    />
-                  ) : (
-                    <h3 className="hub-project-name">{project.name}</h3>
-                  )}
-
-                  <p className="hub-project-file">{project.sourceFileName}</p>
-
-                  <div className="hub-project-stats">
-                    <span>Last opened {formatProjectTime(project.lastOpenedAt)}</span>
-                  </div>
-                </div>
-
-                <div className="hub-project-actions" onClick={(event) => event.stopPropagation()}>
-                  <button type="button" className="hub-card-btn" onClick={() => router.push(`/projects/${project.id}`)}>
-                    Open
-                  </button>
-                  <button
-                    type="button"
-                    className="hub-card-btn"
-                    onClick={() => {
-                      setEditingProjectId(project.id);
-                      setEditingProjectName(project.name);
+              <div className="project-card-body">
+                {editingProjectId === project.id ? (
+                  <input
+                    value={editingProjectName}
+                    className="project-card-name-input"
+                    autoFocus
+                    onClick={(event) => event.stopPropagation()}
+                    onChange={(event) => setEditingProjectName(event.target.value)}
+                    onBlur={() => void commitRename(project.id)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter") {
+                        void commitRename(project.id);
+                      }
+                      if (event.key === "Escape") {
+                        setEditingProjectId(null);
+                        setEditingProjectName("");
+                      }
                     }}
-                  >
-                    Rename
-                  </button>
-                  <button
-                    type="button"
-                    className="hub-card-btn"
-                    onClick={() => void handleExport(project.id)}
-                    disabled={busyAction === `export:${project.id}`}
-                  >
-                    {busyAction === `export:${project.id}` ? "Exporting..." : "Export"}
-                  </button>
-                  <button
-                    type="button"
-                    className="hub-card-btn hub-card-btn-danger"
-                    onClick={() => void handleDelete(project.id)}
-                    disabled={busyAction === `delete:${project.id}` || busyAction === `rename:${project.id}`}
-                  >
-                    {busyAction === `delete:${project.id}` ? "Deleting..." : "Delete"}
-                  </button>
-                </div>
-              </article>
-            ))}
+                  />
+                ) : (
+                  <h3 className="project-card-name">{project.name}</h3>
+                )}
+                <p className="project-card-file">{project.sourceFileName}</p>
+              </div>
+
+              <p className="project-card-meta">Last opened {formatProjectTime(project.lastOpenedAt)}</p>
+            </article>
+          ))}
+        </div>
+      ) : null}
+
+      <Panel
+        open={accountMenuOpen}
+        onClose={() => setAccountMenuOpen(false)}
+        title="Account"
+        anchorRef={accountBtnRef}
+        width={260}
+      >
+        <div className="menu-list">
+          <button
+            type="button"
+            className="menu-item"
+            onClick={() => {
+              setAccountMenuOpen(false);
+              setTheme((current) => (current === "dark" ? "light" : "dark"));
+            }}
+          >
+            <span className="menu-item-glyph" aria-hidden="true">
+              {theme === "dark" ? "☀" : "☾"}
+            </span>
+            {theme === "dark" ? "Light mode" : "Dark mode"}
+          </button>
+          <button
+            type="button"
+            className="menu-item"
+            onClick={() => {
+              setAccountMenuOpen(false);
+              backupInputRef.current?.click();
+            }}
+            disabled={importBusy}
+          >
+            <span className="menu-item-glyph" aria-hidden="true">
+              ↥
+            </span>
+            {busyAction === "import-backup" ? "Restoring backup\u2026" : "Import backup"}
+          </button>
+          <button
+            type="button"
+            className="menu-item menu-item-danger"
+            onClick={() => {
+              setAccountMenuOpen(false);
+              void signOut();
+            }}
+          >
+            <span className="menu-item-glyph" aria-hidden="true">
+              ⎋
+            </span>
+            Sign out
+          </button>
+        </div>
+      </Panel>
+
+      <Panel
+        open={menuProject !== null}
+        onClose={() => setMenuProjectId(null)}
+        title={menuProject?.name}
+        anchorRef={cardMenuAnchorRef}
+        width={240}
+      >
+        {menuProject ? (
+          <div className="menu-list">
+            <button
+              type="button"
+              className="menu-item"
+              onClick={() => {
+                router.push(`/projects/${menuProject.id}`);
+              }}
+            >
+              <span className="menu-item-glyph" aria-hidden="true">
+                ▸
+              </span>
+              Open
+            </button>
+            <button
+              type="button"
+              className="menu-item"
+              onClick={() => {
+                setEditingProjectId(menuProject.id);
+                setEditingProjectName(menuProject.name);
+                setMenuProjectId(null);
+              }}
+            >
+              <span className="menu-item-glyph" aria-hidden="true">
+                ✎
+              </span>
+              Rename
+            </button>
+            <button
+              type="button"
+              className="menu-item"
+              onClick={() => {
+                const id = menuProject.id;
+                setMenuProjectId(null);
+                void handleExport(id);
+              }}
+              disabled={busyAction === `export:${menuProject.id}`}
+            >
+              <span className="menu-item-glyph" aria-hidden="true">
+                ↧
+              </span>
+              {busyAction === `export:${menuProject.id}` ? "Exporting\u2026" : "Export backup"}
+            </button>
+            <button
+              type="button"
+              className="menu-item menu-item-danger"
+              onClick={() => {
+                const id = menuProject.id;
+                setMenuProjectId(null);
+                void handleDelete(id);
+              }}
+              disabled={busyAction === `delete:${menuProject.id}`}
+            >
+              <span className="menu-item-glyph" aria-hidden="true">
+                🗑
+              </span>
+              Delete
+            </button>
           </div>
         ) : null}
-      </section>
-    </section>
+      </Panel>
+    </div>
   );
 }
 
@@ -385,13 +524,10 @@ export default function ProjectHub() {
   return (
     <main className="hub-page">
       <AuthLoading>
-        <section className="hub-shell">
-          <div className="hub-board">
-            <div className="hub-empty">
-              <h2 className="hub-empty-title">Loading account.</h2>
-            </div>
-          </div>
-        </section>
+        <div className="hub-loading">
+          <span className="hub-spinner" aria-hidden="true" />
+          <p>Loading your account…</p>
+        </div>
       </AuthLoading>
       <Unauthenticated>
         <AuthForm theme={theme} setTheme={setTheme} />

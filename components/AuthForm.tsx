@@ -38,22 +38,39 @@ export default function AuthForm({
   }
 
   return (
-    <section className="hub-shell auth-shell">
+    <section className="auth">
+      <button
+        type="button"
+        className="auth-theme-toggle"
+        aria-label={theme === "dark" ? "Switch to light mode" : "Switch to dark mode"}
+        onClick={() => setTheme((current) => (current === "dark" ? "light" : "dark"))}
+      >
+        <span aria-hidden="true">{theme === "dark" ? "☀" : "☾"}</span>
+      </button>
+
       <div className="auth-card">
-        <div className="auth-head">
+        <div className="auth-brand">
+          <span className="auth-mark" aria-hidden="true">
+            🧶
+          </span>
           <p className="hub-kicker">WhichStitch</p>
-          <h1 className="auth-title">{flow === "signIn" ? "Sign in" : "Create account"}</h1>
+          <h1 className="auth-title">{flow === "signIn" ? "Welcome back" : "Create your account"}</h1>
           <p className="auth-subtitle">
             Save your patterns and markups to your account so they follow you from device to device.
           </p>
         </div>
 
-        {error ? <p className="hub-banner">{error}</p> : null}
+        {error ? (
+          <p className="auth-error" role="alert">
+            {error}
+          </p>
+        ) : null}
 
         <form className="auth-form" onSubmit={handleSubmit}>
           <label className="auth-field">
             <span>Email</span>
             <input
+              className="auth-input"
               type="email"
               autoComplete="email"
               required
@@ -65,6 +82,7 @@ export default function AuthForm({
           <label className="auth-field">
             <span>Password</span>
             <input
+              className="auth-input"
               type="password"
               autoComplete={flow === "signIn" ? "current-password" : "new-password"}
               required
@@ -75,11 +93,11 @@ export default function AuthForm({
             />
           </label>
 
-          <button type="submit" className="hub-primary-btn auth-submit" disabled={submitting}>
+          <button type="submit" className="hub-btn hub-btn-primary auth-submit" disabled={submitting}>
             {submitting
               ? flow === "signIn"
-                ? "Signing in..."
-                : "Creating account..."
+                ? "Signing in\u2026"
+                : "Creating account\u2026"
               : flow === "signIn"
                 ? "Sign in"
                 : "Create account"}
@@ -117,14 +135,6 @@ export default function AuthForm({
             </p>
           )}
         </div>
-
-        <button
-          type="button"
-          className={theme === "dark" ? "hub-secondary-btn active auth-theme-btn" : "hub-secondary-btn auth-theme-btn"}
-          onClick={() => setTheme((current) => (current === "dark" ? "light" : "dark"))}
-        >
-          {theme === "dark" ? "Light mode" : "Dark mode"}
-        </button>
       </div>
     </section>
   );

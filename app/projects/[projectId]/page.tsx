@@ -32,8 +32,20 @@ import {
 } from "../../../lib/project-types";
 import { useStoredTheme } from "../../../lib/use-stored-theme";
 import { ERASER_SCREEN_RADIUS, eraseAlongSegment } from "../../../lib/erase";
+import EditorChrome from "../../../components/editor/EditorChrome";
+import ReferenceViewer from "../../../components/editor/ReferenceViewer";
+import Panel from "../../../components/ui/Panel";
 
 type AnnotateTool = DrawTool | "eraser";
+
+const ANNOTATE_TOOLS: { id: AnnotateTool; glyph: string; label: string }[] = [
+  { id: "rectangle", glyph: "▭", label: "Rectangle" },
+  { id: "line", glyph: "╲", label: "Line" },
+  { id: "highlight", glyph: "▤", label: "Highlight" },
+  { id: "freeDraw", glyph: "✎", label: "Free draw" },
+  { id: "text", glyph: "T", label: "Text" },
+  { id: "eraser", glyph: "⌫", label: "Eraser" }
+];
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
@@ -139,46 +151,6 @@ function downloadProjectBackupFile(fileName: string, content: string): void {
   URL.revokeObjectURL(url);
 }
 
-type PopoverLayout = {
-  left: number;
-  top: number;
-  width: number;
-  maxHeight: number;
-};
-
-function getPopoverLayout(
-  rect: DOMRect,
-  options: {
-    desiredWidth: number;
-    preferredHeight: number;
-    minHeight?: number;
-    align?: "left" | "right";
-  }
-): PopoverLayout {
-  const viewportPadding = 12;
-  const gap = 10;
-  const width = Math.min(options.desiredWidth, window.innerWidth - viewportPadding * 2);
-  const left =
-    options.align === "right"
-      ? clamp(rect.right - width, viewportPadding, Math.max(viewportPadding, window.innerWidth - width - viewportPadding))
-      : clamp(rect.left, viewportPadding, Math.max(viewportPadding, window.innerWidth - width - viewportPadding));
-
-  const spaceBelow = Math.max(0, window.innerHeight - rect.bottom - gap - viewportPadding);
-  const spaceAbove = Math.max(0, rect.top - gap - viewportPadding);
-  const preferredHeight = options.preferredHeight;
-  const minHeight = options.minHeight ?? Math.min(160, preferredHeight);
-  const openAbove = spaceAbove > spaceBelow && spaceBelow < preferredHeight;
-  const maxHeight = Math.max(minHeight, openAbove ? spaceAbove : spaceBelow);
-  const top = openAbove ? Math.max(viewportPadding, rect.top - gap - Math.min(preferredHeight, maxHeight)) : rect.bottom + gap;
-
-  return {
-    left,
-    top,
-    width,
-    maxHeight
-  };
-}
-
 function parseGaugeNumber(value: string): number | null {
   const trimmed = value.trim();
   if (!trimmed) {
@@ -232,48 +204,21 @@ export default function ProjectEditorPage({
   const [eraserCursor, setEraserCursor] = useState<{ pageIndex: number; x: number; y: number } | null>(null);
   const [isIndexPopoverOpen, setIsIndexPopoverOpen] = useState(false);
   const [editingAnchorId, setEditingAnchorId] = useState<string | null>(null);
-  const [indexPopoverPosition, setIndexPopoverPosition] = useState<{
-    left: number;
-    top: number;
-    width: number;
-    maxHeight: number;
-  } | null>(null);
   const [referenceCapture, setReferenceCapture] = useState<ReferenceCapture | null>(null);
   const [calculator, setCalculator] = useState<GaugeCalculatorState>(() => createDefaultGaugeCalculator());
   const [isSelectingReference, setIsSelectingReference] = useState(false);
   const [isReferencePopoverOpen, setIsReferencePopoverOpen] = useState(false);
   const [isCalculatorPopoverOpen, setIsCalculatorPopoverOpen] = useState(false);
   const [isZoomPopoverOpen, setIsZoomPopoverOpen] = useState(false);
+  const [isToolsOpen, setIsToolsOpen] = useState(false);
+  const [isCounterMenuOpen, setIsCounterMenuOpen] = useState(false);
+  const [isMoreOpen, setIsMoreOpen] = useState(false);
   const [counters, setCounters] = useState<KnitCounter[]>([]);
   const [connections, setConnections] = useState<CounterConnection[]>([]);
   const [editingCounterId, setEditingCounterId] = useState<string | null>(null);
   const [editingCounterTitle, setEditingCounterTitle] = useState("");
-  const [isTitleTooltipOpen, setIsTitleTooltipOpen] = useState(false);
-  const [referencePopoverPosition, setReferencePopoverPosition] = useState<{
-    left: number;
-    top: number;
-    maxWidth: number;
-    maxHeight: number;
-  } | null>(null);
-  const [titleTooltipPosition, setTitleTooltipPosition] = useState<{
-    left: number;
-    top: number;
-    maxWidth: number;
-  } | null>(null);
-  const [zoomPopoverPosition, setZoomPopoverPosition] = useState<{
-    left: number;
-    top: number;
-    width: number;
-    maxHeight: number;
-  } | null>(null);
-  const [calculatorPopoverPosition, setCalculatorPopoverPosition] = useState<{
-    left: number;
-    top: number;
-    width: number;
-    maxHeight: number;
-  } | null>(null);
-  const [toolbarHeight, setToolbarHeight] = useState(76);
-  const [highlightToolsHeight, setHighlightToolsHeight] = useState(0);
+  const [focusCounterId, setFocusCounterId] = useState<string | null>(null);
+  const [toolbarHeight, setToolbarHeight] = useState(64);
 
   const canvasRefs = useRef<(HTMLCanvasElement | null)[]>([]);
   const pageRefs = useRef<(HTMLElement | null)[]>([]);
@@ -358,22 +303,14 @@ export default function ProjectEditorPage({
   const isPinchGestureRef = useRef(false);
   const annotateScrollTrackRef = useRef<HTMLDivElement | null>(null);
   const annotateScrollDraggingRef = useRef(false);
-  const referenceWrapRef = useRef<HTMLDivElement | null>(null);
-  const referenceButtonRef = useRef<HTMLButtonElement | null>(null);
-  const referencePopoverRef = useRef<HTMLDivElement | null>(null);
-  const calculatorWrapRef = useRef<HTMLDivElement | null>(null);
-  const calculatorButtonRef = useRef<HTMLButtonElement | null>(null);
-  const calculatorPopoverRef = useRef<HTMLDivElement | null>(null);
-  const zoomWrapRef = useRef<HTMLDivElement | null>(null);
-  const zoomButtonRef = useRef<HTMLButtonElement | null>(null);
-  const zoomPopoverRef = useRef<HTMLDivElement | null>(null);
-  const indexWrapRef = useRef<HTMLDivElement | null>(null);
-  const indexButtonRef = useRef<HTMLButtonElement | null>(null);
-  const indexPopoverRef = useRef<HTMLDivElement | null>(null);
-  const titleWrapRef = useRef<HTMLDivElement | null>(null);
-  const titleTriggerRef = useRef<HTMLButtonElement | null>(null);
-  const toolbarRef = useRef<HTMLElement | null>(null);
-  const highlightSubbarRef = useRef<HTMLDivElement | null>(null);
+  const referenceButtonRef = useRef<HTMLButtonElement>(null);
+  const calculatorButtonRef = useRef<HTMLButtonElement>(null);
+  const zoomButtonRef = useRef<HTMLButtonElement>(null);
+  const indexButtonRef = useRef<HTMLButtonElement>(null);
+  const toolsButtonRef = useRef<HTMLButtonElement>(null);
+  const counterButtonRef = useRef<HTMLButtonElement>(null);
+  const moreButtonRef = useRef<HTMLButtonElement>(null);
+  const toolbarRef = useRef<HTMLElement>(null);
   const hydratedWorkspaceRef = useRef(false);
   const latestWorkspaceRef = useRef({
     zoom,
@@ -414,197 +351,15 @@ export default function ProjectEditorPage({
     };
   }, [anchors, calculator, connections, counters, highlights, referenceCapture, strokeColor, zoom]);
 
-  useEffect(() => {
-    if (!isTitleTooltipOpen) {
-      setTitleTooltipPosition(null);
-      return;
-    }
-
-    const updateTooltipPosition = () => {
-      const rect = titleTriggerRef.current?.getBoundingClientRect();
-      if (!rect) {
-        return;
-      }
-
-      const maxWidth = Math.min(352, window.innerWidth - 24);
-      setTitleTooltipPosition({
-        left: clamp(rect.left, 12, Math.max(12, window.innerWidth - maxWidth - 12)),
-        top: rect.bottom + 10,
-        maxWidth
-      });
-    };
-
-    const closeTooltipOnOutsidePointer = (event: PointerEvent) => {
-      if (titleWrapRef.current?.contains(event.target as Node)) {
-        return;
-      }
-      setIsTitleTooltipOpen(false);
-    };
-
-    updateTooltipPosition();
-    window.addEventListener("resize", updateTooltipPosition);
-    window.addEventListener("pointerdown", closeTooltipOnOutsidePointer);
-    return () => {
-      window.removeEventListener("resize", updateTooltipPosition);
-      window.removeEventListener("pointerdown", closeTooltipOnOutsidePointer);
-    };
-  }, [isTitleTooltipOpen]);
-
-  useEffect(() => {
-    if (!isReferencePopoverOpen || !referenceCapture) {
-      setReferencePopoverPosition(null);
-      return;
-    }
-
-    const updatePopoverPosition = () => {
-      const rect = referenceButtonRef.current?.getBoundingClientRect();
-      if (!rect) {
-        return;
-      }
-
-      const layout = getPopoverLayout(rect, {
-        desiredWidth: 460,
-        preferredHeight: 360,
-        minHeight: 180,
-        align: "left"
-      });
-      setReferencePopoverPosition({
-        left: layout.left,
-        top: layout.top,
-        maxWidth: layout.width,
-        maxHeight: layout.maxHeight
-      });
-    };
-
-    const closePopoverOnOutsidePointer = (event: PointerEvent) => {
-      const target = event.target as Node;
-      if (referenceWrapRef.current?.contains(target) || referencePopoverRef.current?.contains(target)) {
-        return;
-      }
-      setIsReferencePopoverOpen(false);
-    };
-
-    updatePopoverPosition();
-    window.addEventListener("resize", updatePopoverPosition);
-    window.addEventListener("pointerdown", closePopoverOnOutsidePointer);
-    return () => {
-      window.removeEventListener("resize", updatePopoverPosition);
-      window.removeEventListener("pointerdown", closePopoverOnOutsidePointer);
-    };
-  }, [isReferencePopoverOpen, referenceCapture, toolbarHeight]);
-
-  useEffect(() => {
-    if (!isCalculatorPopoverOpen) {
-      setCalculatorPopoverPosition(null);
-      return;
-    }
-
-    const updatePopoverPosition = () => {
-      const rect = calculatorButtonRef.current?.getBoundingClientRect();
-      if (!rect) {
-        return;
-      }
-
-      const layout = getPopoverLayout(rect, {
-        desiredWidth: 350,
-        preferredHeight: 396,
-        minHeight: 292,
-        align: "right"
-      });
-      setCalculatorPopoverPosition(layout);
-    };
-
-    const closePopoverOnOutsidePointer = (event: PointerEvent) => {
-      const target = event.target as Node;
-      if (calculatorWrapRef.current?.contains(target) || calculatorPopoverRef.current?.contains(target)) {
-        return;
-      }
-      setIsCalculatorPopoverOpen(false);
-    };
-
-    updatePopoverPosition();
-    window.addEventListener("resize", updatePopoverPosition);
-    window.addEventListener("pointerdown", closePopoverOnOutsidePointer);
-    return () => {
-      window.removeEventListener("resize", updatePopoverPosition);
-      window.removeEventListener("pointerdown", closePopoverOnOutsidePointer);
-    };
-  }, [isCalculatorPopoverOpen, toolbarHeight]);
-
-  useEffect(() => {
-    if (!isZoomPopoverOpen) {
-      setZoomPopoverPosition(null);
-      return;
-    }
-
-    const updatePopoverPosition = () => {
-      const rect = zoomButtonRef.current?.getBoundingClientRect();
-      if (!rect) {
-        return;
-      }
-
-      const layout = getPopoverLayout(rect, {
-        desiredWidth: 248,
-        preferredHeight: 168,
-        minHeight: 140,
-        align: "right"
-      });
-      setZoomPopoverPosition(layout);
-    };
-
-    const closePopoverOnOutsidePointer = (event: PointerEvent) => {
-      const target = event.target as Node;
-      if (zoomWrapRef.current?.contains(target) || zoomPopoverRef.current?.contains(target)) {
-        return;
-      }
-      setIsZoomPopoverOpen(false);
-    };
-
-    updatePopoverPosition();
-    window.addEventListener("resize", updatePopoverPosition);
-    window.addEventListener("pointerdown", closePopoverOnOutsidePointer);
-    return () => {
-      window.removeEventListener("resize", updatePopoverPosition);
-      window.removeEventListener("pointerdown", closePopoverOnOutsidePointer);
-    };
-  }, [isZoomPopoverOpen, toolbarHeight, zoom]);
-
-  useEffect(() => {
-    if (!isIndexPopoverOpen) {
-      setIndexPopoverPosition(null);
-      return;
-    }
-
-    const updatePopoverPosition = () => {
-      const rect = indexButtonRef.current?.getBoundingClientRect();
-      if (!rect) {
-        return;
-      }
-      const layout = getPopoverLayout(rect, {
-        desiredWidth: 300,
-        preferredHeight: 360,
-        minHeight: 200,
-        align: "right"
-      });
-      setIndexPopoverPosition(layout);
-    };
-
-    const closePopoverOnOutsidePointer = (event: PointerEvent) => {
-      const target = event.target as Node;
-      if (indexWrapRef.current?.contains(target) || indexPopoverRef.current?.contains(target)) {
-        return;
-      }
-      setIsIndexPopoverOpen(false);
-    };
-
-    updatePopoverPosition();
-    window.addEventListener("resize", updatePopoverPosition);
-    window.addEventListener("pointerdown", closePopoverOnOutsidePointer);
-    return () => {
-      window.removeEventListener("resize", updatePopoverPosition);
-      window.removeEventListener("pointerdown", closePopoverOnOutsidePointer);
-    };
-  }, [isIndexPopoverOpen, toolbarHeight]);
+  const closeAllPanels = useCallback(() => {
+    setIsToolsOpen(false);
+    setIsCounterMenuOpen(false);
+    setIsZoomPopoverOpen(false);
+    setIsIndexPopoverOpen(false);
+    setIsCalculatorPopoverOpen(false);
+    setIsReferencePopoverOpen(false);
+    setIsMoreOpen(false);
+  }, []);
 
   useEffect(() => {
     if (mode !== "highlight" || drawTool !== "eraser") {
@@ -630,29 +385,6 @@ export default function ProjectEditorPage({
       observer.disconnect();
     };
   }, []);
-
-  useEffect(() => {
-    if (mode !== "highlight") {
-      setHighlightToolsHeight(0);
-      return;
-    }
-
-    const subbarNode = highlightSubbarRef.current;
-    if (!subbarNode) {
-      return;
-    }
-
-    const updateSubbarHeight = () => {
-      setHighlightToolsHeight(Math.ceil(subbarNode.getBoundingClientRect().height));
-    };
-
-    updateSubbarHeight();
-    const observer = new ResizeObserver(updateSubbarHeight);
-    observer.observe(subbarNode);
-    return () => {
-      observer.disconnect();
-    };
-  }, [mode]);
 
   useEffect(() => {
     if (projectData === undefined) {
@@ -1813,6 +1545,40 @@ export default function ProjectEditorPage({
     applyConnectedIncrement(counterId, amount);
   }
 
+  function tapHaptic() {
+    if (typeof navigator !== "undefined" && typeof navigator.vibrate === "function") {
+      navigator.vibrate(8);
+    }
+  }
+
+  function nudgeCounter(counterId: string, delta: number) {
+    tapHaptic();
+    setFocusCounterId(counterId);
+    if (delta >= 0) {
+      applyCounterIncrement(counterId, delta);
+      return;
+    }
+    const current = counters.find((item) => item.id === counterId);
+    if (!current) {
+      return;
+    }
+    setCounterValue(counterId, current.value + delta);
+  }
+
+  function scrollCounterIntoView(counter: KnitCounter) {
+    setFocusCounterId(counter.id);
+    const viewer = viewerRef.current;
+    const pageElement = pageRefs.current[counter.pageIndex];
+    if (!viewer || !pageElement) {
+      return;
+    }
+    const viewerRect = viewer.getBoundingClientRect();
+    const rect = pageElement.getBoundingClientRect();
+    const pageTopContent = rect.top - viewerRect.top + viewer.scrollTop;
+    const target = pageTopContent + counter.y * zoom - (toolbarHeight + 96);
+    viewer.scrollTo({ top: Math.max(0, target), behavior: "smooth" });
+  }
+
   function undoCounter(counterId: string) {
     const outgoing = new Map<string, string[]>();
     for (const connection of connections) {
@@ -1890,18 +1656,50 @@ export default function ProjectEditorPage({
   }
 
   function toggleCalculatorPopover() {
-    setIsReferencePopoverOpen(false);
-    setIsTitleTooltipOpen(false);
-    setIsZoomPopoverOpen(false);
-    setIsCalculatorPopoverOpen((prev) => !prev);
+    const willOpen = !isCalculatorPopoverOpen;
+    closeAllPanels();
+    setIsCalculatorPopoverOpen(willOpen);
+  }
+
+  function toggleZoomPopover() {
+    const willOpen = !isZoomPopoverOpen;
+    closeAllPanels();
+    setIsZoomPopoverOpen(willOpen);
+  }
+
+  function toggleIndexPopover() {
+    const willOpen = !isIndexPopoverOpen;
+    closeAllPanels();
+    setIsIndexPopoverOpen(willOpen);
+  }
+
+  function toggleToolsPanel() {
+    const willOpen = !isToolsOpen;
+    closeAllPanels();
+    if (willOpen && mode !== "highlight") {
+      setMode("highlight");
+    }
+    setIsToolsOpen(willOpen);
+  }
+
+  function toggleCounterMenu() {
+    const willOpen = !isCounterMenuOpen;
+    closeAllPanels();
+    setIsCounterMenuOpen(willOpen);
+  }
+
+  function toggleMoreMenu() {
+    const willOpen = !isMoreOpen;
+    closeAllPanels();
+    setIsMoreOpen(willOpen);
   }
 
   function onReferenceButtonClick() {
-    setIsCalculatorPopoverOpen(false);
-    setIsTitleTooltipOpen(false);
-    setIsZoomPopoverOpen(false);
+    const wasReferenceOpen = isReferencePopoverOpen;
+    const wasSelecting = isSelectingReference;
+    closeAllPanels();
 
-    if (isSelectingReference) {
+    if (wasSelecting) {
       setIsSelectingReference(false);
       setDraftReferenceRect(null);
       drawingRef.current = null;
@@ -1910,11 +1708,10 @@ export default function ProjectEditorPage({
 
     if (!referenceCapture) {
       setIsSelectingReference(true);
-      setIsReferencePopoverOpen(false);
       return;
     }
 
-    setIsReferencePopoverOpen((prev) => !prev);
+    setIsReferencePopoverOpen(!wasReferenceOpen);
   }
 
   function handleViewerPointerDown(event: React.PointerEvent<HTMLDivElement>) {
@@ -2064,19 +1861,16 @@ export default function ProjectEditorPage({
     }
   }
 
-  const highlightSubbarTop = toolbarHeight + 8;
-  const viewerTopPadding = toolbarHeight + (mode === "highlight" ? highlightToolsHeight + 18 : 14);
-  const annotateScrollbarTop = toolbarHeight + highlightToolsHeight + 16;
+  const viewerTopPadding = toolbarHeight + 14;
+  const annotateScrollbarTop = toolbarHeight + 16;
 
   if (projectStatus === "loading") {
     return (
       <main className="hub-page">
-        <section className="hub-shell">
-          <div className="hub-empty">
-            <p className="hub-empty-label">Loading project</p>
-            <h1 className="hub-empty-title">Reopening your pattern workspace.</h1>
-          </div>
-        </section>
+        <div className="hub-loading">
+          <span className="hub-spinner" aria-hidden="true" />
+          <p>Reopening your pattern workspace…</p>
+        </div>
       </main>
     );
   }
@@ -2084,15 +1878,20 @@ export default function ProjectEditorPage({
   if (projectStatus === "missing" || !project) {
     return (
       <main className="hub-page">
-        <section className="hub-shell">
+        <div className="hub">
           <div className="hub-empty">
-            <p className="hub-empty-label">Project not found</p>
-            <h1 className="hub-empty-title">This pattern isn&apos;t in your account.</h1>
-            <button type="button" className="hub-primary-btn" onClick={() => router.push("/")}>
-              Return to Project Hub
-            </button>
+            <div className="hub-empty-mark" aria-hidden="true">
+              🧶
+            </div>
+            <h1 className="hub-empty-title">This pattern isn&apos;t in your account</h1>
+            <p className="hub-empty-text">It may have been deleted, or it lives in a different account.</p>
+            <div className="hub-empty-actions">
+              <button type="button" className="hub-btn hub-btn-primary" onClick={() => router.push("/")}>
+                Back to Projects
+              </button>
+            </div>
           </div>
-        </section>
+        </div>
       </main>
     );
   }
@@ -2100,192 +1899,75 @@ export default function ProjectEditorPage({
   if (projectStatus === "error") {
     return (
       <main className="hub-page">
-        <section className="hub-shell">
+        <div className="hub">
           <div className="hub-empty">
-            <p className="hub-empty-label">Load failed</p>
-            <h1 className="hub-empty-title">The PDF or workspace could not be loaded from your account.</h1>
-            <button type="button" className="hub-primary-btn" onClick={() => router.push("/")}>
-              Return to Project Hub
-            </button>
+            <div className="hub-empty-mark" aria-hidden="true">
+              ⚠
+            </div>
+            <h1 className="hub-empty-title">Couldn&apos;t load this pattern</h1>
+            <p className="hub-empty-text">The PDF or workspace could not be loaded from your account.</p>
+            <div className="hub-empty-actions">
+              <button type="button" className="hub-btn hub-btn-primary" onClick={() => router.push("/")}>
+                Back to Projects
+              </button>
+            </div>
           </div>
-        </section>
+        </div>
       </main>
     );
   }
 
   return (
     <main className="pdf-app">
-      <header ref={toolbarRef} className="pdf-toolbar">
-        <div className="toolbar-row toolbar-row-primary">
-          <div className="toolbar-group toolbar-group-primary">
-            <button type="button" className="toolbar-btn toolbar-nav-btn" onClick={() => router.push("/")}>
-              <span className="toolbar-nav-arrow" aria-hidden="true">
-                ←
-              </span>
-              <span>Project Hub</span>
-            </button>
-            <div
-              ref={titleWrapRef}
-              className="toolbar-title-wrap"
-              onPointerEnter={() => setIsTitleTooltipOpen(true)}
-              onPointerLeave={() => setIsTitleTooltipOpen(false)}
-            >
-              <button
-                ref={titleTriggerRef}
-                type="button"
-                className="status-chip toolbar-project-chip toolbar-title-trigger"
-                onClick={() => {
-                  setIsReferencePopoverOpen(false);
-                  setIsCalculatorPopoverOpen(false);
-                  setIsZoomPopoverOpen(false);
-                  setIsTitleTooltipOpen((current) => !current);
-                }}
-                onFocus={() => setIsTitleTooltipOpen(true)}
-                onBlur={() => setIsTitleTooltipOpen(false)}
-                aria-expanded={isTitleTooltipOpen}
-                aria-describedby={isTitleTooltipOpen ? "project-file-tooltip" : undefined}
-                aria-label={`Project ${project.metadata.name}. Source file ${project.metadata.sourceFileName}`}
-              >
-                {project.metadata.name}
-              </button>
-            </div>
-          </div>
-        </div>
-
-        <div className="toolbar-row toolbar-row-secondary">
-          <div className="toolbar-group toolbar-group-mode">
-            <button
-              type="button"
-              className={mode === "pan" ? "toolbar-btn toolbar-compact-btn active" : "toolbar-btn toolbar-compact-btn"}
-              onClick={() => setMode("pan")}
-            >
-              Pan
-            </button>
-            <button
-              type="button"
-              className={mode === "highlight" ? "toolbar-btn toolbar-compact-btn active" : "toolbar-btn toolbar-compact-btn"}
-              onClick={() => setMode("highlight")}
-            >
-              Annotate
-            </button>
-          </div>
-
-          <div className="toolbar-group toolbar-group-actions">
-            <div ref={referenceWrapRef} className="reference-wrap">
-              <button
-                ref={referenceButtonRef}
-                type="button"
-                className={isSelectingReference ? "toolbar-btn active reference-btn" : "toolbar-btn reference-btn"}
-                onClick={onReferenceButtonClick}
-              >
-                <span>Reference</span>
-                {referenceCapture ? (
-                  <span
-                    className="reference-thumb"
-                    style={{ backgroundImage: `url(${referenceCapture.imageDataUrl})` }}
-                    aria-hidden="true"
-                  />
-                ) : null}
-              </button>
-            </div>
-            <button type="button" className="toolbar-btn" onClick={() => addCounter("row")}>
-              Row
-            </button>
-            <button type="button" className="toolbar-btn" onClick={() => addCounter("stitch")}>
-              Stitch
-            </button>
-            <button type="button" className="toolbar-btn toolbar-action-export" onClick={handleExportProject} disabled={isExporting}>
-              {isExporting ? "Exporting..." : "Export"}
-            </button>
-            <div ref={zoomWrapRef} className="zoom-wrap">
-              <button
-                ref={zoomButtonRef}
-                type="button"
-                className={isZoomPopoverOpen ? "toolbar-btn toolbar-compact-btn zoom-trigger active" : "toolbar-btn toolbar-compact-btn zoom-trigger"}
-                onClick={() => {
-                  setIsReferencePopoverOpen(false);
-                  setIsTitleTooltipOpen(false);
-                  setIsCalculatorPopoverOpen(false);
-                  setIsZoomPopoverOpen((current) => !current);
-                }}
-                aria-expanded={isZoomPopoverOpen}
-                aria-controls={isZoomPopoverOpen ? "zoom-popover" : undefined}
-              >
-                <span>Zoom</span>
-                <span className="zoom-trigger-value">{Math.round(zoom * 100)}%</span>
-              </button>
-            </div>
-          </div>
-          <div className="toolbar-group toolbar-group-primary-actions">
-            <div ref={indexWrapRef} className="index-wrap">
-              <button
-                ref={indexButtonRef}
-                type="button"
-                className={isIndexPopoverOpen ? "toolbar-btn toolbar-compact-btn active" : "toolbar-btn toolbar-compact-btn"}
-                onClick={() => {
-                  setIsReferencePopoverOpen(false);
-                  setIsTitleTooltipOpen(false);
-                  setIsCalculatorPopoverOpen(false);
-                  setIsZoomPopoverOpen(false);
-                  setIsIndexPopoverOpen((current) => !current);
-                }}
-                aria-expanded={isIndexPopoverOpen}
-                aria-controls={isIndexPopoverOpen ? "index-popover" : undefined}
-              >
-                Index
-              </button>
-            </div>
-            <div ref={calculatorWrapRef} className="calculator-wrap">
-              <button
-                ref={calculatorButtonRef}
-                type="button"
-                className={isCalculatorPopoverOpen ? "toolbar-btn toolbar-compact-btn active" : "toolbar-btn toolbar-compact-btn"}
-                onClick={toggleCalculatorPopover}
-                aria-expanded={isCalculatorPopoverOpen}
-                aria-controls={isCalculatorPopoverOpen ? "calculator-popover" : undefined}
-              >
-                Calculator
-              </button>
-            </div>
-            <button
-              type="button"
-              className={theme === "dark" ? "toolbar-btn toolbar-icon-btn active" : "toolbar-btn toolbar-icon-btn"}
-              onClick={() => setTheme((prev) => (prev === "dark" ? "light" : "dark"))}
-              aria-label={theme === "dark" ? "Switch to light mode" : "Switch to dark mode"}
-              title={theme === "dark" ? "Switch to light mode" : "Switch to dark mode"}
-            >
-              <span className="toolbar-theme-icon" aria-hidden="true">
-                ☾
-              </span>
-            </button>
-          </div>
-        </div>
-        {isTitleTooltipOpen && titleTooltipPosition ? (
-          <span
-            id="project-file-tooltip"
-            className="toolbar-title-tooltip open"
-            role="tooltip"
-            style={{
-              left: titleTooltipPosition.left,
-              top: titleTooltipPosition.top,
-              maxWidth: titleTooltipPosition.maxWidth
-            }}
-          >
-            {project.metadata.sourceFileName}
-          </span>
-        ) : null}
-        {isCalculatorPopoverOpen && calculatorPopoverPosition ? (
-          <div
-            ref={calculatorPopoverRef}
-            id="calculator-popover"
-            className="calculator-popover"
-            style={{
-              left: calculatorPopoverPosition.left,
-              top: calculatorPopoverPosition.top,
-              width: calculatorPopoverPosition.width,
-              maxHeight: calculatorPopoverPosition.maxHeight
-            }}
-          >
+      <EditorChrome
+        toolbarRef={toolbarRef}
+        projectName={project.metadata.name}
+        sourceFileName={project.metadata.sourceFileName}
+        onBack={() => router.push("/")}
+        theme={theme}
+        onToggleTheme={() => setTheme((prev) => (prev === "dark" ? "light" : "dark"))}
+        mode={mode}
+        onSetMode={(nextMode) => {
+          setMode(nextMode);
+          if (nextMode === "pan") {
+            setIsToolsOpen(false);
+          }
+        }}
+        isExporting={isExporting}
+        onExport={() => {
+          setIsMoreOpen(false);
+          void handleExportProject();
+        }}
+        zoomPercent={Math.round(zoom * 100)}
+        isToolsOpen={isToolsOpen}
+        onToggleTools={toggleToolsPanel}
+        toolsButtonRef={toolsButtonRef}
+        isCounterMenuOpen={isCounterMenuOpen}
+        onToggleCounterMenu={toggleCounterMenu}
+        counterButtonRef={counterButtonRef}
+        isZoomOpen={isZoomPopoverOpen}
+        onToggleZoom={toggleZoomPopover}
+        zoomButtonRef={zoomButtonRef}
+        isIndexOpen={isIndexPopoverOpen}
+        onToggleIndex={toggleIndexPopover}
+        indexButtonRef={indexButtonRef}
+        isCalcOpen={isCalculatorPopoverOpen}
+        onToggleCalc={toggleCalculatorPopover}
+        calcButtonRef={calculatorButtonRef}
+        isReferenceActive={isSelectingReference || isReferencePopoverOpen}
+        onReferenceClick={onReferenceButtonClick}
+        referenceButtonRef={referenceButtonRef}
+        isMoreOpen={isMoreOpen}
+        onToggleMore={toggleMoreMenu}
+        moreButtonRef={moreButtonRef}
+      />
+        <Panel
+          open={isCalculatorPopoverOpen}
+          onClose={() => setIsCalculatorPopoverOpen(false)}
+          anchorRef={calculatorButtonRef}
+          width={360}
+          className="calculator-panel"
+        >
             <div className="calculator-head">
               <h2 className="calculator-title">Calculator</h2>
               <div className="calculator-head-actions">
@@ -2405,88 +2087,72 @@ export default function ProjectEditorPage({
                 </div>
               </div>
             </section>
+        </Panel>
+        <Panel
+          open={isReferencePopoverOpen && !!referenceCapture}
+          onClose={() => setIsReferencePopoverOpen(false)}
+          anchorRef={referenceButtonRef}
+          width={520}
+          title="Reference"
+          className="reference-panel"
+        >
+          {referenceCapture ? (
+            <>
+              <ReferenceViewer src={referenceCapture.imageDataUrl} />
+              <button
+                type="button"
+                className="reference-reset-btn"
+                onClick={() => {
+                  setReferenceCapture(null);
+                  setIsReferencePopoverOpen(false);
+                  setIsSelectingReference(false);
+                  setDraftReferenceRect(null);
+                  drawingRef.current = null;
+                }}
+              >
+                Reset reference
+              </button>
+            </>
+          ) : null}
+        </Panel>
+        <Panel
+          open={isZoomPopoverOpen}
+          onClose={() => setIsZoomPopoverOpen(false)}
+          anchorRef={zoomButtonRef}
+          width={300}
+          title="Zoom"
+          className="zoom-panel"
+        >
+          <div className="zoom-popover-head">
+            <span>Fit to screen</span>
+            <strong>{Math.round(zoom * 100)}%</strong>
           </div>
-        ) : null}
-        {isReferencePopoverOpen && referenceCapture && referencePopoverPosition ? (
-          <div
-            ref={referencePopoverRef}
-            className="reference-popover"
-            style={{
-              left: referencePopoverPosition.left,
-              top: referencePopoverPosition.top,
-              maxWidth: referencePopoverPosition.maxWidth,
-              maxHeight: referencePopoverPosition.maxHeight
-            }}
-          >
-            {/* eslint-disable-next-line @next/next/no-img-element */}
-            <img
-              className="reference-preview-image"
-              src={referenceCapture.imageDataUrl}
-              alt="Reference capture"
-            />
-            <button
-              type="button"
-              className="reference-reset-btn"
-              onClick={() => {
-                setReferenceCapture(null);
-                setIsReferencePopoverOpen(false);
-                setIsSelectingReference(false);
-                setDraftReferenceRect(null);
-                drawingRef.current = null;
-              }}
-            >
-              Reset
-            </button>
+          <input
+            className="zoom-popover-slider"
+            type="range"
+            min={MIN_ZOOM}
+            max={MAX_ZOOM}
+            step={0.05}
+            value={zoom}
+            onChange={(event) => setZoom(Number(event.target.value))}
+            aria-label="Zoom level"
+          />
+          <div className="zoom-popover-scale" aria-hidden="true">
+            <span>{Math.round(MIN_ZOOM * 100)}%</span>
+            <span>{Math.round(MAX_ZOOM * 100)}%</span>
           </div>
-        ) : null}
-        {isZoomPopoverOpen && zoomPopoverPosition ? (
-          <div
-            ref={zoomPopoverRef}
-            id="zoom-popover"
-            className="zoom-popover"
-            style={{
-              left: zoomPopoverPosition.left,
-              top: zoomPopoverPosition.top,
-              width: zoomPopoverPosition.width,
-              maxHeight: zoomPopoverPosition.maxHeight
-            }}
-          >
-            <div className="zoom-popover-head">
-              <span>Zoom</span>
-              <strong>{Math.round(zoom * 100)}%</strong>
-            </div>
-            <input
-              className="zoom-popover-slider"
-              type="range"
-              min={MIN_ZOOM}
-              max={MAX_ZOOM}
-              step={0.05}
-              value={zoom}
-              onChange={(event) => setZoom(Number(event.target.value))}
-              aria-label="Zoom level"
-            />
-            <div className="zoom-popover-scale" aria-hidden="true">
-              <span>{Math.round(MIN_ZOOM * 100)}%</span>
-              <span>{Math.round(MAX_ZOOM * 100)}%</span>
-            </div>
-          </div>
-        ) : null}
-        {isIndexPopoverOpen && indexPopoverPosition ? (
-          <div
-            ref={indexPopoverRef}
-            id="index-popover"
-            className="index-popover"
-            style={{
-              left: indexPopoverPosition.left,
-              top: indexPopoverPosition.top,
-              width: indexPopoverPosition.width,
-              maxHeight: indexPopoverPosition.maxHeight
-            }}
-          >
+        </Panel>
+        <Panel
+          open={isIndexPopoverOpen}
+          onClose={() => setIsIndexPopoverOpen(false)}
+          anchorRef={indexButtonRef}
+          width={320}
+          title="Index"
+          className="index-panel"
+        >
             <div className="index-head">
-              <h2 className="index-title">Index</h2>
               <button type="button" className="index-add-btn" onClick={addAnchorAtCurrentPosition}>
-                + Mark here
+                + Mark current spot
               </button>
             </div>
             {anchors.length === 0 ? (
@@ -2543,61 +2209,40 @@ export default function ProjectEditorPage({
                 ))}
               </ul>
             )}
+        </Panel>
+
+        <Panel
+          open={isToolsOpen}
+          onClose={() => setIsToolsOpen(false)}
+          anchorRef={toolsButtonRef}
+          width={320}
+          title="Mark-up tools"
+          className="tools-panel"
+        >
+          <div className="tool-grid">
+            {ANNOTATE_TOOLS.map((tool) => (
+              <button
+                key={tool.id}
+                type="button"
+                className={drawTool === tool.id ? "tool-btn active" : "tool-btn"}
+                onClick={() => setDrawTool(tool.id)}
+                aria-pressed={drawTool === tool.id}
+              >
+                <span className="tool-btn-glyph" aria-hidden="true">
+                  {tool.glyph}
+                </span>
+                <span className="tool-btn-label">{tool.label}</span>
+              </button>
+            ))}
           </div>
-        ) : null}
-      </header>
-      {mode === "highlight" ? (
-        <div ref={highlightSubbarRef} className="highlight-subbar" style={{ top: highlightSubbarTop }}>
-          <button
-            type="button"
-            className={drawTool === "rectangle" ? "toolbar-btn active" : "toolbar-btn"}
-            onClick={() => setDrawTool("rectangle")}
-          >
-            Draw Rectangle
-          </button>
-          <button
-            type="button"
-            className={drawTool === "line" ? "toolbar-btn active" : "toolbar-btn"}
-            onClick={() => setDrawTool("line")}
-          >
-            Draw Line
-          </button>
-          <button
-            type="button"
-            className={drawTool === "highlight" ? "toolbar-btn active" : "toolbar-btn"}
-            onClick={() => setDrawTool("highlight")}
-          >
-            Draw Highlight
-          </button>
-          <button
-            type="button"
-            className={drawTool === "freeDraw" ? "toolbar-btn active" : "toolbar-btn"}
-            onClick={() => setDrawTool("freeDraw")}
-          >
-            Free Draw
-          </button>
-          <button
-            type="button"
-            className={drawTool === "text" ? "toolbar-btn active" : "toolbar-btn"}
-            onClick={() => setDrawTool("text")}
-          >
-            Add Text
-          </button>
-          <button
-            type="button"
-            className={drawTool === "eraser" ? "toolbar-btn active" : "toolbar-btn"}
-            onClick={() => setDrawTool("eraser")}
-          >
-            Eraser
-          </button>
-          <div className="color-picker-wrap" role="group" aria-label="Annotation stroke color">
-            <span>Stroke</span>
-            <div className="stroke-palette">
+          <div className="tool-section">
+            <span className="tool-section-label">Color</span>
+            <div className="tool-swatches" role="group" aria-label="Annotation stroke color">
               {STROKE_PALETTE.map((color) => (
                 <button
                   key={color}
                   type="button"
-                  className={strokeColor === color ? "stroke-swatch active" : "stroke-swatch"}
+                  className={strokeColor === color ? "tool-swatch active" : "tool-swatch"}
                   style={{ background: color }}
                   onClick={() => setStrokeColor(color)}
                   aria-label={`Set stroke color ${color}`}
@@ -2605,16 +2250,116 @@ export default function ProjectEditorPage({
               ))}
             </div>
           </div>
-          <button
-            type="button"
-            className="toolbar-btn"
-            onClick={undoLatestAnnotation}
-            disabled={!highlights.length}
-          >
-            Undo
+          <button type="button" className="tool-undo" onClick={undoLatestAnnotation} disabled={!highlights.length}>
+            Undo last mark
           </button>
-        </div>
-      ) : null}
+        </Panel>
+
+        <Panel
+          open={isCounterMenuOpen}
+          onClose={() => setIsCounterMenuOpen(false)}
+          anchorRef={counterButtonRef}
+          width={320}
+          title="Counters"
+          className="counters-panel"
+        >
+          {counters.length > 0 ? (
+            <ul className="counter-quick-list">
+              {counters.map((counter) => (
+                <li
+                  key={counter.id}
+                  className={`counter-quick${focusCounterId === counter.id ? " focused" : ""}`}
+                >
+                  <button
+                    type="button"
+                    className="counter-quick-info"
+                    onClick={() => scrollCounterIntoView(counter)}
+                    aria-label={`Find ${counter.label} on the page`}
+                  >
+                    <span className="counter-quick-name">{counter.label}</span>
+                    <span className="counter-quick-kind">{counter.type}</span>
+                  </button>
+                  <div className="counter-quick-controls">
+                    <button
+                      type="button"
+                      className="counter-step"
+                      onClick={() => nudgeCounter(counter.id, -1)}
+                      aria-label={`Decrease ${counter.label}`}
+                    >
+                      −
+                    </button>
+                    <span className="counter-quick-value" aria-live="polite">
+                      {counter.value}
+                    </span>
+                    <button
+                      type="button"
+                      className="counter-step plus"
+                      onClick={() => nudgeCounter(counter.id, 1)}
+                      aria-label={`Increase ${counter.label}`}
+                    >
+                      +
+                    </button>
+                  </div>
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <p className="panel-empty-note">
+              No counters yet. Add one below to start tracking rows and stitches.
+            </p>
+          )}
+          <div className="counter-add-row">
+            <button type="button" className="counter-add-btn" onClick={() => addCounter("row")}>
+              <span aria-hidden="true">↻</span> Row counter
+            </button>
+            <button type="button" className="counter-add-btn" onClick={() => addCounter("stitch")}>
+              <span aria-hidden="true">▦</span> Stitch counter
+            </button>
+          </div>
+        </Panel>
+
+        <Panel
+          open={isMoreOpen}
+          onClose={() => setIsMoreOpen(false)}
+          anchorRef={moreButtonRef}
+          width={260}
+          title="More"
+        >
+          <div className="menu-list">
+            <button type="button" className="menu-item" onClick={toggleIndexPopover}>
+              <span className="menu-item-glyph" aria-hidden="true">
+                📋
+              </span>
+              Index
+            </button>
+            <button type="button" className="menu-item" onClick={toggleCalculatorPopover}>
+              <span className="menu-item-glyph" aria-hidden="true">
+                🧮
+              </span>
+              Gauge calculator
+            </button>
+            <button type="button" className="menu-item" onClick={onReferenceButtonClick}>
+              <span className="menu-item-glyph" aria-hidden="true">
+                ❒
+              </span>
+              {referenceCapture ? "Reference" : "Capture reference"}
+            </button>
+            <button
+              type="button"
+              className="menu-item"
+              onClick={() => {
+                setIsMoreOpen(false);
+                void handleExportProject();
+              }}
+              disabled={isExporting}
+            >
+              <span className="menu-item-glyph" aria-hidden="true">
+                ↧
+              </span>
+              {isExporting ? "Exporting…" : "Export backup"}
+            </button>
+          </div>
+        </Panel>
       {mode === "highlight" ? (
         <div className="annotate-scrollbar-wrap" aria-label="Annotate mode scroll" style={{ top: annotateScrollbarTop }}>
           <div
@@ -2914,7 +2659,7 @@ export default function ProjectEditorPage({
                 .map((counter) => (
                   <div
                     key={counter.id}
-                    className={`knit-counter ${counter.type}`}
+                    className={`knit-counter ${counter.type}${focusCounterId === counter.id ? " focused" : ""}`}
                     style={{ left: counter.x * zoom, top: counter.y * zoom }}
                   >
                     <div className="counter-top">
@@ -2973,6 +2718,7 @@ export default function ProjectEditorPage({
                       min={0}
                       value={counter.value}
                       onChange={(event) => setCounterValue(counter.id, Number(event.target.value) || 0)}
+                      onFocus={() => setFocusCounterId(counter.id)}
                       className="counter-value-input"
                       aria-label={`${counter.label} value`}
                     />
@@ -2985,19 +2731,28 @@ export default function ProjectEditorPage({
                       </button>
                       <button
                         type="button"
-                        onClick={() => applyCounterIncrement(counter.id, 1)}
+                        onClick={() => {
+                          tapHaptic();
+                          applyCounterIncrement(counter.id, 1);
+                        }}
                       >
                         +1
                       </button>
                       <button
                         type="button"
-                        onClick={() => applyCounterIncrement(counter.id, 5)}
+                        onClick={() => {
+                          tapHaptic();
+                          applyCounterIncrement(counter.id, 5);
+                        }}
                       >
                         +5
                       </button>
                       <button
                         type="button"
-                        onClick={() => applyCounterIncrement(counter.id, 10)}
+                        onClick={() => {
+                          tapHaptic();
+                          applyCounterIncrement(counter.id, 10);
+                        }}
                       >
                         +10
                       </button>
