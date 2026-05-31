@@ -41,7 +41,7 @@ function transactionToPromise(transaction: IDBTransaction): Promise<void> {
   });
 }
 
-function normalizeWorkspace(workspace: Partial<ProjectWorkspace> | null | undefined): ProjectWorkspace {
+export function normalizeWorkspace(workspace: Partial<ProjectWorkspace> | null | undefined): ProjectWorkspace {
   const fallback = createDefaultWorkspace();
   return {
     zoom: typeof workspace?.zoom === "number" ? workspace.zoom : fallback.zoom,
@@ -50,6 +50,7 @@ function normalizeWorkspace(workspace: Partial<ProjectWorkspace> | null | undefi
     connections: Array.isArray(workspace?.connections) ? workspace.connections : fallback.connections,
     referenceCapture: workspace?.referenceCapture ?? fallback.referenceCapture,
     strokeColor: typeof workspace?.strokeColor === "string" ? workspace.strokeColor : fallback.strokeColor,
+    anchors: Array.isArray(workspace?.anchors) ? workspace.anchors : fallback.anchors,
     calculator: {
       patternRowsPerInch:
         typeof workspace?.calculator?.patternRowsPerInch === "string"

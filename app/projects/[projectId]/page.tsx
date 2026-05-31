@@ -2,8 +2,11 @@
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { PDFDocumentProxy } from "pdfjs-dist/legacy/build/pdf.mjs";
+import { useConvexAuth, useMutation, useQuery } from "convex/react";
+import { api } from "@/convex/_generated/api";
 import { getPdfPageMetrics, loadPdfFromBlob } from "../../../lib/pdf";
-import { clearLegacyWorkspaceStorage, exportProjectBackup, getProject, requestDurableStorage, saveProjectWorkspace, touchProject, updateProjectPageCount } from "../../../lib/project-store";
+import { blobToBase64 } from "../../../lib/convex-upload";
+import { normalizeWorkspace } from "../../../lib/project-store";
 import {
   COUNTER_GAP,
   COUNTER_HITBOX_HEIGHT,
@@ -23,10 +26,14 @@ import {
   type PageMetric,
   type ProjectRecord,
   type ReferenceCapture,
+  type ScrollAnchor,
   type ViewerMode,
   createDefaultGaugeCalculator
 } from "../../../lib/project-types";
 import { useStoredTheme } from "../../../lib/use-stored-theme";
+import { ERASER_SCREEN_RADIUS, eraseAlongSegment } from "../../../lib/erase";
+
+type AnnotateTool = DrawTool | "eraser";
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
@@ -205,6 +212,11 @@ export default function ProjectEditorPage({
 }) {
   const router = useRouter();
   const { theme, setTheme } = useStoredTheme();
+  const { isAuthenticated, isLoading: isAuthLoading } = useConvexAuth();
+  const projectData = useQuery(api.projects.get, { projectId: params.projectId });
+  const touchProjectMutation = useMutation(api.projects.touch);
+  const saveWorkspaceMutation = useMutation(api.projects.saveWorkspace);
+  const updatePageCountMutation = useMutation(api.projects.updatePageCount);
   const [project, setProject] = useState<ProjectRecord | null>(null);
   const [projectStatus, setProjectStatus] = useState<"loading" | "ready" | "missing" | "error">("loading");
   const [, setSaveStatus] = useState<"saved" | "saving" | "error">("saved");
@@ -213,9 +225,19 @@ export default function ProjectEditorPage({
   const [pages, setPages] = useState<PageMetric[]>([]);
   const [zoom, setZoom] = useState(1.1);
   const [mode, setMode] = useState<ViewerMode>("pan");
-  const [drawTool, setDrawTool] = useState<DrawTool>("rectangle");
+  const [drawTool, setDrawTool] = useState<AnnotateTool>("rectangle");
   const [strokeColor, setStrokeColor] = useState(DEFAULT_STROKE_COLOR);
   const [highlights, setHighlights] = useState<Annotation[]>([]);
+  const [anchors, setAnchors] = useState<ScrollAnchor[]>([]);
+  const [eraserCursor, setEraserCursor] = useState<{ pageIndex: number; x: number; y: number } | null>(null);
+  const [isIndexPopoverOpen, setIsIndexPopoverOpen] = useState(false);
+  const [editingAnchorId, setEditingAnchorId] = useState<string | null>(null);
+  const [indexPopoverPosition, setIndexPopoverPosition] = useState<{
+    left: number;
+    top: number;
+    width: number;
+    maxHeight: number;
+  } | null>(null);
   const [referenceCapture, setReferenceCapture] = useState<ReferenceCapture | null>(null);
   const [calculator, setCalculator] = useState<GaugeCalculatorState>(() => createDefaultGaugeCalculator());
   const [isSelectingReference, setIsSelectingReference] = useState(false);
@@ -276,6 +298,12 @@ export default function ProjectEditorPage({
     pageIndex: number;
     startX: number;
     startY: number;
+  } | null>(null);
+
+  const erasingRef = useRef<{
+    pageIndex: number;
+    lastX: number;
+    lastY: number;
   } | null>(null);
 
   const draggingCounterRef = useRef<{
@@ -339,6 +367,9 @@ export default function ProjectEditorPage({
   const zoomWrapRef = useRef<HTMLDivElement | null>(null);
   const zoomButtonRef = useRef<HTMLButtonElement | null>(null);
   const zoomPopoverRef = useRef<HTMLDivElement | null>(null);
+  const indexWrapRef = useRef<HTMLDivElement | null>(null);
+  const indexButtonRef = useRef<HTMLButtonElement | null>(null);
+  const indexPopoverRef = useRef<HTMLDivElement | null>(null);
   const titleWrapRef = useRef<HTMLDivElement | null>(null);
   const titleTriggerRef = useRef<HTMLButtonElement | null>(null);
   const toolbarRef = useRef<HTMLElement | null>(null);
@@ -351,7 +382,8 @@ export default function ProjectEditorPage({
     connections,
     referenceCapture,
     strokeColor,
-    calculator
+    calculator,
+    anchors
   });
 
   const cancelInProgressAnnotation = useCallback(() => {
@@ -364,9 +396,10 @@ export default function ProjectEditorPage({
   }, []);
 
   useEffect(() => {
-    clearLegacyWorkspaceStorage();
-    void requestDurableStorage();
-  }, []);
+    if (!isAuthLoading && !isAuthenticated) {
+      router.replace("/");
+    }
+  }, [isAuthLoading, isAuthenticated, router]);
 
   useEffect(() => {
     latestWorkspaceRef.current = {
@@ -376,9 +409,10 @@ export default function ProjectEditorPage({
       connections,
       referenceCapture,
       strokeColor,
-      calculator
+      calculator,
+      anchors
     };
-  }, [calculator, connections, counters, highlights, referenceCapture, strokeColor, zoom]);
+  }, [anchors, calculator, connections, counters, highlights, referenceCapture, strokeColor, zoom]);
 
   useEffect(() => {
     if (!isTitleTooltipOpen) {
@@ -536,6 +570,50 @@ export default function ProjectEditorPage({
   }, [isZoomPopoverOpen, toolbarHeight, zoom]);
 
   useEffect(() => {
+    if (!isIndexPopoverOpen) {
+      setIndexPopoverPosition(null);
+      return;
+    }
+
+    const updatePopoverPosition = () => {
+      const rect = indexButtonRef.current?.getBoundingClientRect();
+      if (!rect) {
+        return;
+      }
+      const layout = getPopoverLayout(rect, {
+        desiredWidth: 300,
+        preferredHeight: 360,
+        minHeight: 200,
+        align: "right"
+      });
+      setIndexPopoverPosition(layout);
+    };
+
+    const closePopoverOnOutsidePointer = (event: PointerEvent) => {
+      const target = event.target as Node;
+      if (indexWrapRef.current?.contains(target) || indexPopoverRef.current?.contains(target)) {
+        return;
+      }
+      setIsIndexPopoverOpen(false);
+    };
+
+    updatePopoverPosition();
+    window.addEventListener("resize", updatePopoverPosition);
+    window.addEventListener("pointerdown", closePopoverOnOutsidePointer);
+    return () => {
+      window.removeEventListener("resize", updatePopoverPosition);
+      window.removeEventListener("pointerdown", closePopoverOnOutsidePointer);
+    };
+  }, [isIndexPopoverOpen, toolbarHeight]);
+
+  useEffect(() => {
+    if (mode !== "highlight" || drawTool !== "eraser") {
+      setEraserCursor(null);
+      erasingRef.current = null;
+    }
+  }, [mode, drawTool]);
+
+  useEffect(() => {
     const toolbarNode = toolbarRef.current;
     if (!toolbarNode) {
       return;
@@ -577,47 +655,67 @@ export default function ProjectEditorPage({
   }, [mode]);
 
   useEffect(() => {
-    let cancelled = false;
+    if (projectData === undefined) {
+      setProjectStatus("loading");
+      return;
+    }
 
-    async function loadProjectRecord() {
+    if (projectData === null) {
+      if (!isAuthLoading) {
+        setProject(null);
+        setProjectStatus("missing");
+      }
+      return;
+    }
+
+    if (hydratedWorkspaceRef.current) {
+      return;
+    }
+
+    let cancelled = false;
+    const loaded = projectData;
+
+    async function hydrateProject() {
       setProjectStatus("loading");
       setPdfDoc(null);
       setPages([]);
-      hydratedWorkspaceRef.current = false;
 
       try {
-        const loaded = await getProject(params.projectId);
+        const response = await fetch(loaded.pdfUrl);
+        if (!response.ok) {
+          throw new Error("The PDF could not be downloaded.");
+        }
+        const pdfBlob = await response.blob();
         if (cancelled) {
           return;
         }
 
-        if (!loaded) {
-          setProject(null);
-          setProjectStatus("missing");
-          return;
-        }
+        const workspace = normalizeWorkspace(loaded.workspace);
+        const metadata = { ...loaded.metadata, id: String(loaded.metadata.id) };
 
-        setProject(loaded);
         latestWorkspaceRef.current = {
-          zoom: clamp(loaded.workspace.zoom, MIN_ZOOM, MAX_ZOOM),
-          annotations: loaded.workspace.annotations,
-          counters: loaded.workspace.counters,
-          connections: loaded.workspace.connections,
-          referenceCapture: loaded.workspace.referenceCapture,
-          strokeColor: loaded.workspace.strokeColor,
-          calculator: loaded.workspace.calculator
+          zoom: clamp(workspace.zoom, MIN_ZOOM, MAX_ZOOM),
+          annotations: workspace.annotations,
+          counters: workspace.counters,
+          connections: workspace.connections,
+          referenceCapture: workspace.referenceCapture,
+          strokeColor: workspace.strokeColor,
+          calculator: workspace.calculator,
+          anchors: workspace.anchors
         };
-        setZoom(clamp(loaded.workspace.zoom, MIN_ZOOM, MAX_ZOOM));
-        setStrokeColor(loaded.workspace.strokeColor);
-        setHighlights(loaded.workspace.annotations);
-        setCounters(loaded.workspace.counters.map((counter) => ({ ...counter })));
-        setConnections(loaded.workspace.connections);
-        setReferenceCapture(loaded.workspace.referenceCapture);
-        setCalculator(loaded.workspace.calculator);
+        setProject({ metadata, pdfBlob, workspace });
+        setZoom(clamp(workspace.zoom, MIN_ZOOM, MAX_ZOOM));
+        setStrokeColor(workspace.strokeColor);
+        setHighlights(workspace.annotations);
+        setCounters(workspace.counters.map((counter) => ({ ...counter })));
+        setConnections(workspace.connections);
+        setReferenceCapture(workspace.referenceCapture);
+        setCalculator(workspace.calculator);
+        setAnchors(workspace.anchors);
         setProjectStatus("ready");
         setSaveStatus("saved");
         hydratedWorkspaceRef.current = true;
-        void touchProject(loaded.metadata.id);
+        void touchProjectMutation({ projectId: metadata.id });
       } catch {
         if (!cancelled) {
           setProject(null);
@@ -626,12 +724,12 @@ export default function ProjectEditorPage({
       }
     }
 
-    void loadProjectRecord();
+    void hydrateProject();
 
     return () => {
       cancelled = true;
     };
-  }, [params.projectId]);
+  }, [projectData, isAuthLoading, touchProjectMutation]);
 
   useEffect(() => {
     if (!project) {
@@ -653,7 +751,7 @@ export default function ProjectEditorPage({
         setPages(metrics);
 
         if (currentProject.metadata.pageCount !== metrics.length) {
-          void updateProjectPageCount(currentProject.metadata.id, metrics.length);
+          void updatePageCountMutation({ projectId: currentProject.metadata.id, pageCount: metrics.length });
         }
       } catch {
         if (!cancelled) {
@@ -667,7 +765,7 @@ export default function ProjectEditorPage({
     return () => {
       cancelled = true;
     };
-  }, [project]);
+  }, [project, updatePageCountMutation]);
 
   useEffect(() => {
     if (!project || !hydratedWorkspaceRef.current) {
@@ -677,7 +775,7 @@ export default function ProjectEditorPage({
     const projectId = project.metadata.id;
     setSaveStatus("saving");
     const timeoutId = window.setTimeout(() => {
-      void saveProjectWorkspace(projectId, latestWorkspaceRef.current)
+      void saveWorkspaceMutation({ projectId, workspace: normalizeWorkspace(latestWorkspaceRef.current) })
         .then(() => {
           setSaveStatus("saved");
         })
@@ -689,7 +787,7 @@ export default function ProjectEditorPage({
     return () => {
       window.clearTimeout(timeoutId);
     };
-  }, [calculator, connections, counters, highlights, project, referenceCapture, strokeColor, zoom]);
+  }, [anchors, calculator, connections, counters, highlights, project, referenceCapture, saveWorkspaceMutation, strokeColor, zoom]);
 
   useEffect(() => {
     if (!project) {
@@ -701,7 +799,7 @@ export default function ProjectEditorPage({
       if (!hydratedWorkspaceRef.current) {
         return;
       }
-      void saveProjectWorkspace(projectId, latestWorkspaceRef.current).catch(() => {
+      void saveWorkspaceMutation({ projectId, workspace: normalizeWorkspace(latestWorkspaceRef.current) }).catch(() => {
         setSaveStatus("error");
       });
     };
@@ -718,7 +816,7 @@ export default function ProjectEditorPage({
       window.removeEventListener("pagehide", flushWorkspace);
       document.removeEventListener("visibilitychange", onVisibilityChange);
     };
-  }, [project]);
+  }, [project, saveWorkspaceMutation]);
 
   useEffect(() => {
     // Keep browser-level pinch zoom disabled so the fixed toolbar stays in screen space.
@@ -825,6 +923,28 @@ export default function ProjectEditorPage({
       if (isPinchGestureRef.current) {
         return;
       }
+
+      const erasing = erasingRef.current;
+      if (erasing) {
+        event.preventDefault();
+        const pageElement = pageRefs.current[erasing.pageIndex];
+        const pageMetric = pages[erasing.pageIndex];
+        if (!pageElement || !pageMetric) {
+          return;
+        }
+        const rect = pageElement.getBoundingClientRect();
+        const x = clamp((event.clientX - rect.left) / zoom, 0, pageMetric.width);
+        const y = clamp((event.clientY - rect.top) / zoom, 0, pageMetric.height);
+        const radius = ERASER_SCREEN_RADIUS / zoom;
+        setEraserCursor({ pageIndex: erasing.pageIndex, x, y });
+        setHighlights((prev) => {
+          const result = eraseAlongSegment(prev, erasing.pageIndex, erasing.lastX, erasing.lastY, x, y, radius);
+          return result.changed ? result.annotations : prev;
+        });
+        erasingRef.current = { pageIndex: erasing.pageIndex, lastX: x, lastY: y };
+        return;
+      }
+
       const drawing = drawingRef.current;
       if (drawing) {
         if (mode !== "highlight" && !isSelectingReference) {
@@ -1001,6 +1121,12 @@ export default function ProjectEditorPage({
       if (isPinchGestureRef.current) {
         return;
       }
+
+      if (erasingRef.current) {
+        erasingRef.current = null;
+        return;
+      }
+
       const drawing = drawingRef.current;
       if (drawing && mode !== "highlight" && !isSelectingReference) {
         cancelInProgressAnnotation();
@@ -1228,6 +1354,17 @@ export default function ProjectEditorPage({
       const startX = clamp((event.clientX - rect.left) / zoom, 0, pages[pageIndex]?.width ?? 0);
       const startY = clamp((event.clientY - rect.top) / zoom, 0, pages[pageIndex]?.height ?? 0);
 
+      if (drawTool === "eraser") {
+        const radius = ERASER_SCREEN_RADIUS / zoom;
+        erasingRef.current = { pageIndex, lastX: startX, lastY: startY };
+        setEraserCursor({ pageIndex, x: startX, y: startY });
+        setHighlights((prev) => {
+          const result = eraseAlongSegment(prev, pageIndex, startX, startY, startX, startY, radius);
+          return result.changed ? result.annotations : prev;
+        });
+        return;
+      }
+
       if (drawTool === "text") {
         if (hadTextSelected) {
           return;
@@ -1289,6 +1426,84 @@ export default function ProjectEditorPage({
       startScrollLeft: viewer.scrollLeft,
       startScrollTop: viewer.scrollTop
     };
+  }
+
+  function pageOverlayPointerMove(event: React.PointerEvent, pageIndex: number) {
+    if (mode !== "highlight" || drawTool !== "eraser" || erasingRef.current) {
+      return;
+    }
+    const pageElement = pageRefs.current[pageIndex];
+    const pageMetric = pages[pageIndex];
+    if (!pageElement || !pageMetric) {
+      return;
+    }
+    const rect = pageElement.getBoundingClientRect();
+    setEraserCursor({
+      pageIndex,
+      x: clamp((event.clientX - rect.left) / zoom, 0, pageMetric.width),
+      y: clamp((event.clientY - rect.top) / zoom, 0, pageMetric.height)
+    });
+  }
+
+  function locateCurrentAnchor(): { pageIndex: number; yRatio: number } | null {
+    const viewer = viewerRef.current;
+    if (!viewer || pages.length === 0) {
+      return null;
+    }
+    const viewerRect = viewer.getBoundingClientRect();
+    const lineClientY = viewerRect.top + toolbarHeight + 16;
+
+    for (let i = 0; i < pages.length; i += 1) {
+      const pageElement = pageRefs.current[i];
+      if (!pageElement) {
+        continue;
+      }
+      const rect = pageElement.getBoundingClientRect();
+      if (lineClientY < rect.top) {
+        return { pageIndex: i, yRatio: 0 };
+      }
+      if (lineClientY <= rect.bottom) {
+        return { pageIndex: i, yRatio: clamp((lineClientY - rect.top) / rect.height, 0, 1) };
+      }
+    }
+    return { pageIndex: pages.length - 1, yRatio: 1 };
+  }
+
+  function scrollToAnchor(anchor: ScrollAnchor) {
+    const viewer = viewerRef.current;
+    const pageElement = pageRefs.current[anchor.pageIndex];
+    if (!viewer || !pageElement) {
+      return;
+    }
+    const viewerRect = viewer.getBoundingClientRect();
+    const rect = pageElement.getBoundingClientRect();
+    const pageTopContent = rect.top - viewerRect.top + viewer.scrollTop;
+    const target = pageTopContent + anchor.yRatio * rect.height - (toolbarHeight + 16);
+    viewer.scrollTo({ top: Math.max(0, target), behavior: "smooth" });
+  }
+
+  function addAnchorAtCurrentPosition() {
+    const located = locateCurrentAnchor();
+    if (!located) {
+      return;
+    }
+    const id = `anchor-${Date.now()}`;
+    setAnchors((prev) => [
+      ...prev,
+      { id, name: `Mark ${prev.length + 1}`, pageIndex: located.pageIndex, yRatio: located.yRatio }
+    ]);
+    setEditingAnchorId(id);
+  }
+
+  function renameAnchor(anchorId: string, name: string) {
+    setAnchors((prev) => prev.map((anchor) => (anchor.id === anchorId ? { ...anchor, name } : anchor)));
+  }
+
+  function deleteAnchor(anchorId: string) {
+    setAnchors((prev) => prev.filter((anchor) => anchor.id !== anchorId));
+    if (editingAnchorId === anchorId) {
+      setEditingAnchorId(null);
+    }
   }
 
   function addCounter(type: CounterType) {
@@ -1829,11 +2044,14 @@ export default function ProjectEditorPage({
 
     setIsExporting(true);
     try {
-      const backup = await exportProjectBackup(project.metadata.id);
-      if (!backup) {
-        setSaveStatus("error");
-        return;
-      }
+      const backup = {
+        version: 1 as const,
+        exportedAt: new Date().toISOString(),
+        metadata: project.metadata,
+        workspace: normalizeWorkspace(latestWorkspaceRef.current),
+        pdfBase64: await blobToBase64(project.pdfBlob),
+        pdfMimeType: project.pdfBlob.type || "application/pdf"
+      };
 
       downloadProjectBackupFile(
         `${project.metadata.name || project.metadata.sourceFileName}.whichstitch.json`,
@@ -1869,7 +2087,7 @@ export default function ProjectEditorPage({
         <section className="hub-shell">
           <div className="hub-empty">
             <p className="hub-empty-label">Project not found</p>
-            <h1 className="hub-empty-title">This pattern is no longer on the device.</h1>
+            <h1 className="hub-empty-title">This pattern isn&apos;t in your account.</h1>
             <button type="button" className="hub-primary-btn" onClick={() => router.push("/")}>
               Return to Project Hub
             </button>
@@ -1885,7 +2103,7 @@ export default function ProjectEditorPage({
         <section className="hub-shell">
           <div className="hub-empty">
             <p className="hub-empty-label">Load failed</p>
-            <h1 className="hub-empty-title">The PDF or workspace could not be loaded from storage.</h1>
+            <h1 className="hub-empty-title">The PDF or workspace could not be loaded from your account.</h1>
             <button type="button" className="hub-primary-btn" onClick={() => router.push("/")}>
               Return to Project Hub
             </button>
@@ -1999,6 +2217,24 @@ export default function ProjectEditorPage({
             </div>
           </div>
           <div className="toolbar-group toolbar-group-primary-actions">
+            <div ref={indexWrapRef} className="index-wrap">
+              <button
+                ref={indexButtonRef}
+                type="button"
+                className={isIndexPopoverOpen ? "toolbar-btn toolbar-compact-btn active" : "toolbar-btn toolbar-compact-btn"}
+                onClick={() => {
+                  setIsReferencePopoverOpen(false);
+                  setIsTitleTooltipOpen(false);
+                  setIsCalculatorPopoverOpen(false);
+                  setIsZoomPopoverOpen(false);
+                  setIsIndexPopoverOpen((current) => !current);
+                }}
+                aria-expanded={isIndexPopoverOpen}
+                aria-controls={isIndexPopoverOpen ? "index-popover" : undefined}
+              >
+                Index
+              </button>
+            </div>
             <div ref={calculatorWrapRef} className="calculator-wrap">
               <button
                 ref={calculatorButtonRef}
@@ -2235,6 +2471,80 @@ export default function ProjectEditorPage({
             </div>
           </div>
         ) : null}
+        {isIndexPopoverOpen && indexPopoverPosition ? (
+          <div
+            ref={indexPopoverRef}
+            id="index-popover"
+            className="index-popover"
+            style={{
+              left: indexPopoverPosition.left,
+              top: indexPopoverPosition.top,
+              width: indexPopoverPosition.width,
+              maxHeight: indexPopoverPosition.maxHeight
+            }}
+          >
+            <div className="index-head">
+              <h2 className="index-title">Index</h2>
+              <button type="button" className="index-add-btn" onClick={addAnchorAtCurrentPosition}>
+                + Mark here
+              </button>
+            </div>
+            {anchors.length === 0 ? (
+              <p className="index-empty">
+                Scroll to a spot in your pattern, then tap “Mark here” to save a named jump point.
+              </p>
+            ) : (
+              <ul className="index-list">
+                {anchors.map((anchor) => (
+                  <li key={anchor.id} className="index-item">
+                    {editingAnchorId === anchor.id ? (
+                      <input
+                        className="index-item-input"
+                        autoFocus
+                        value={anchor.name}
+                        onChange={(event) => renameAnchor(anchor.id, event.target.value)}
+                        onBlur={() => setEditingAnchorId(null)}
+                        onKeyDown={(event) => {
+                          if (event.key === "Enter" || event.key === "Escape") {
+                            setEditingAnchorId(null);
+                          }
+                        }}
+                      />
+                    ) : (
+                      <button
+                        type="button"
+                        className="index-item-go"
+                        onClick={() => scrollToAnchor(anchor)}
+                        title={`Jump to ${anchor.name}`}
+                      >
+                        <span className="index-item-name">{anchor.name || "Untitled mark"}</span>
+                        <span className="index-item-page">p.{anchor.pageIndex + 1}</span>
+                      </button>
+                    )}
+                    <div className="index-item-actions">
+                      <button
+                        type="button"
+                        className="index-item-btn"
+                        onClick={() => setEditingAnchorId(editingAnchorId === anchor.id ? null : anchor.id)}
+                        aria-label={`Rename ${anchor.name}`}
+                      >
+                        Rename
+                      </button>
+                      <button
+                        type="button"
+                        className="index-item-btn index-item-btn-danger"
+                        onClick={() => deleteAnchor(anchor.id)}
+                        aria-label={`Delete ${anchor.name}`}
+                      >
+                        ✕
+                      </button>
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        ) : null}
       </header>
       {mode === "highlight" ? (
         <div ref={highlightSubbarRef} className="highlight-subbar" style={{ top: highlightSubbarTop }}>
@@ -2272,6 +2582,13 @@ export default function ProjectEditorPage({
             onClick={() => setDrawTool("text")}
           >
             Add Text
+          </button>
+          <button
+            type="button"
+            className={drawTool === "eraser" ? "toolbar-btn active" : "toolbar-btn"}
+            onClick={() => setDrawTool("eraser")}
+          >
+            Eraser
           </button>
           <div className="color-picker-wrap" role="group" aria-label="Annotation stroke color">
             <span>Stroke</span>
@@ -2343,7 +2660,7 @@ export default function ProjectEditorPage({
         onPointerUp={handleViewerPointerEnd}
         onPointerCancel={handleViewerPointerEnd}
       >
-        {!pdfDoc ? <div className="empty-state">Loading pattern pages from device storage.</div> : null}
+        {!pdfDoc ? <div className="empty-state">Loading pattern pages from your account.</div> : null}
 
         <div className="pdf-pages-layer" ref={pagesLayerRef}>
           {pages.map((page, pageIndex) => (
@@ -2362,7 +2679,27 @@ export default function ProjectEditorPage({
                 className="pdf-canvas"
               />
 
-            <div className="overlay-layer" onPointerDown={(event) => pageOverlayPointerDown(event, pageIndex)}>
+            <div
+              className="overlay-layer"
+              onPointerDown={(event) => pageOverlayPointerDown(event, pageIndex)}
+              onPointerMove={(event) => pageOverlayPointerMove(event, pageIndex)}
+              onPointerLeave={() => {
+                if (!erasingRef.current) {
+                  setEraserCursor(null);
+                }
+              }}
+            >
+              {mode === "highlight" && drawTool === "eraser" && eraserCursor && eraserCursor.pageIndex === pageIndex ? (
+                <div
+                  className="eraser-cursor"
+                  style={{
+                    left: eraserCursor.x * zoom,
+                    top: eraserCursor.y * zoom,
+                    width: ERASER_SCREEN_RADIUS * 2,
+                    height: ERASER_SCREEN_RADIUS * 2
+                  }}
+                />
+              ) : null}
               <svg className="connection-layer" viewBox={`0 0 ${page.width * zoom} ${page.height * zoom}`} preserveAspectRatio="none">
                 <defs>
                   <marker id="conn-arrow" markerWidth="8" markerHeight="8" refX="6.5" refY="4" orient="auto">

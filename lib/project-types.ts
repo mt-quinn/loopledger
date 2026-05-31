@@ -61,6 +61,13 @@ export type ReferenceCapture = {
   imageDataUrl: string;
 };
 
+export type ScrollAnchor = {
+  id: string;
+  name: string;
+  pageIndex: number;
+  yRatio: number;
+};
+
 export type ProjectWorkspace = {
   zoom: number;
   annotations: Annotation[];
@@ -69,6 +76,7 @@ export type ProjectWorkspace = {
   referenceCapture: ReferenceCapture | null;
   strokeColor: string;
   calculator: GaugeCalculatorState;
+  anchors: ScrollAnchor[];
 };
 
 export type ProjectMetadata = {
@@ -151,6 +159,7 @@ export function createDefaultWorkspace(): ProjectWorkspace {
     connections: [],
     referenceCapture: null,
     strokeColor: DEFAULT_STROKE_COLOR,
-    calculator: createDefaultGaugeCalculator()
+    calculator: createDefaultGaugeCalculator(),
+    anchors: []
   };
 }
