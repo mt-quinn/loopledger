@@ -18,7 +18,12 @@ export default defineSchema({
     pdfStorageId: v.id("_storage"),
     pdfMimeType: v.string(),
     // Small page-1 preview (JPEG data URL) shown on library cards.
-    thumbnailDataUrl: v.optional(v.string())
+    thumbnailDataUrl: v.optional(v.string()),
+    // Finished-project archive. Absent status means active.
+    status: v.optional(v.union(v.literal("active"), v.literal("finished"))),
+    finishedAt: v.optional(v.string()),
+    finishedNotes: v.optional(v.string()),
+    finishedPhotoIds: v.optional(v.array(v.id("_storage")))
   })
     .index("by_user", ["userId"])
     .index("by_user_and_fingerprint", ["userId", "fingerprint"]),

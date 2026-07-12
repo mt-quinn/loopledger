@@ -14,9 +14,14 @@ function toMetadata(project: Doc<"projects">) {
     updatedAt: project.updatedAt,
     lastOpenedAt: project.lastOpenedAt,
     pageCount: project.pageCount,
-    thumbnailDataUrl: project.thumbnailDataUrl
+    thumbnailDataUrl: project.thumbnailDataUrl,
+    status: project.status ?? "active",
+    finishedAt: project.finishedAt,
+    finishedNotes: project.finishedNotes
   };
 }
+
+const MAX_FINISHED_PHOTOS = 6;
 
 // Generous ceiling for a ~360px JPEG data URL; rejects accidental huge payloads.
 const MAX_THUMBNAIL_LENGTH = 200_000;
@@ -58,9 +63,49 @@ export const list = query({
       .withIndex("by_user", (q) => q.eq("userId", userId))
       .collect();
 
-    return projects
-      .sort((left, right) => right.lastOpenedAt.localeCompare(left.lastOpenedAt))
-      .map(toMetadata);
+    const sorted = projects.sort((left, right) => right.lastOpenedAt.localeCompare(left.lastOpenedAt));
+    return await Promise.all(
+      sorted.map(async (project) => {
+        const coverPhotoId = project.finishedPhotoIds?.[0];
+        return {
+          ...toMetadata(project),
+          finishedCoverUrl: coverPhotoId ? await ctx.storage.getUrl(coverPhotoId) : null
+        };
+      })
+    );
+  }
+});
+
+export const finishedDetails = query({
+  args: { projectId: v.string() },
+  handler: async (ctx, args) => {
+    const userId = await getAuthUserId(ctx);
+    if (userId === null) {
+      return null;
+    }
+    const project = await loadOwnedProject(ctx, userId, args.projectId);
+    if (!project) {
+      return null;
+    }
+
+    const photoIds = project.finishedPhotoIds ?? [];
+    const photos = await Promise.all(
+      photoIds.map(async (storageId) => ({
+        storageId,
+        url: await ctx.storage.getUrl(storageId)
+      }))
+    );
+
+    return {
+      status: project.status ?? "active",
+      finishedAt: project.finishedAt ?? null,
+      notes: project.finishedNotes ?? "",
+      photos: photos.filter((photo) => photo.url !== null) as Array<{
+        storageId: Id<"_storage">;
+        url: string;
+      }>,
+      maxPhotos: MAX_FINISHED_PHOTOS
+    };
   }
 });
 
@@ -208,6 +253,98 @@ export const rename = mutation({
   }
 });
 
+export const finish = mutation({
+  args: { projectId: v.string() },
+  handler: async (ctx, args) => {
+    const userId = await requireUserId(ctx);
+    const project = await loadOwnedProject(ctx, userId, args.projectId);
+    if (!project || project.status === "finished") {
+      return;
+    }
+    await ctx.db.patch(project._id, {
+      status: "finished",
+      finishedAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    });
+  }
+});
+
+export const reactivate = mutation({
+  args: { projectId: v.string() },
+  handler: async (ctx, args) => {
+    const userId = await requireUserId(ctx);
+    const project = await loadOwnedProject(ctx, userId, args.projectId);
+    if (!project || (project.status ?? "active") === "active") {
+      return;
+    }
+    // Photos and notes are kept — moving back to active is reversible.
+    await ctx.db.patch(project._id, {
+      status: "active",
+      lastOpenedAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    });
+  }
+});
+
+export const updateFinishedNotes = mutation({
+  args: { projectId: v.string(), notes: v.string() },
+  handler: async (ctx, args) => {
+    const userId = await requireUserId(ctx);
+    const project = await loadOwnedProject(ctx, userId, args.projectId);
+    if (!project) {
+      return;
+    }
+    await ctx.db.patch(project._id, {
+      finishedNotes: args.notes.slice(0, 4000),
+      updatedAt: new Date().toISOString()
+    });
+  }
+});
+
+export const addFinishedPhoto = mutation({
+  args: { projectId: v.string(), storageId: v.id("_storage") },
+  handler: async (ctx, args) => {
+    const userId = await requireUserId(ctx);
+    const project = await loadOwnedProject(ctx, userId, args.projectId);
+    if (!project) {
+      await ctx.storage.delete(args.storageId);
+      return { added: false };
+    }
+
+    const existing = project.finishedPhotoIds ?? [];
+    if (existing.length >= MAX_FINISHED_PHOTOS) {
+      await ctx.storage.delete(args.storageId);
+      return { added: false };
+    }
+
+    await ctx.db.patch(project._id, {
+      finishedPhotoIds: [...existing, args.storageId],
+      updatedAt: new Date().toISOString()
+    });
+    return { added: true };
+  }
+});
+
+export const removeFinishedPhoto = mutation({
+  args: { projectId: v.string(), storageId: v.id("_storage") },
+  handler: async (ctx, args) => {
+    const userId = await requireUserId(ctx);
+    const project = await loadOwnedProject(ctx, userId, args.projectId);
+    if (!project) {
+      return;
+    }
+    const existing = project.finishedPhotoIds ?? [];
+    if (!existing.includes(args.storageId)) {
+      return;
+    }
+    await ctx.storage.delete(args.storageId);
+    await ctx.db.patch(project._id, {
+      finishedPhotoIds: existing.filter((id) => id !== args.storageId),
+      updatedAt: new Date().toISOString()
+    });
+  }
+});
+
 export const setThumbnail = mutation({
   args: { projectId: v.string(), thumbnailDataUrl: v.string() },
   handler: async (ctx, args) => {
@@ -288,6 +425,9 @@ export const remove = mutation({
       await ctx.db.delete(workspaceRecord._id);
     }
 
+    for (const photoId of project.finishedPhotoIds ?? []) {
+      await ctx.storage.delete(photoId);
+    }
     await ctx.storage.delete(project.pdfStorageId);
     await ctx.db.delete(project._id);
   }

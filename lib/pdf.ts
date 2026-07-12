@@ -24,26 +24,28 @@ export async function loadPdfFromBlob(pdfBlob: Blob): Promise<PDFDocumentProxy> 
 
 const THUMBNAIL_MAX_DIM = 360;
 
-/** Renders page 1 to a small JPEG data URL for library cards. */
-export async function renderPdfThumbnail(pdfDoc: PDFDocumentProxy): Promise<string | null> {
+/**
+ * Downscales an already-rendered page canvas into a small JPEG data URL for
+ * library cards. Reusing the on-screen canvas avoids a second pdf.js render
+ * of the same page, which can stall while the visible render is in flight.
+ */
+export function canvasToThumbnail(sourceCanvas: HTMLCanvasElement): string | null {
   try {
-    const page = await pdfDoc.getPage(1);
-    const base = page.getViewport({ scale: 1 });
-    const scale = THUMBNAIL_MAX_DIM / Math.max(base.width, base.height);
-    const viewport = page.getViewport({ scale });
-
-    const canvas = document.createElement("canvas");
-    canvas.width = Math.max(1, Math.floor(viewport.width));
-    canvas.height = Math.max(1, Math.floor(viewport.height));
-    const context = canvas.getContext("2d");
+    if (sourceCanvas.width < 1 || sourceCanvas.height < 1) {
+      return null;
+    }
+    const scale = Math.min(1, THUMBNAIL_MAX_DIM / Math.max(sourceCanvas.width, sourceCanvas.height));
+    const target = document.createElement("canvas");
+    target.width = Math.max(1, Math.round(sourceCanvas.width * scale));
+    target.height = Math.max(1, Math.round(sourceCanvas.height * scale));
+    const context = target.getContext("2d");
     if (!context) {
       return null;
     }
-
     context.fillStyle = "#ffffff";
-    context.fillRect(0, 0, canvas.width, canvas.height);
-    await page.render({ canvasContext: context, viewport }).promise;
-    return canvas.toDataURL("image/jpeg", 0.72);
+    context.fillRect(0, 0, target.width, target.height);
+    context.drawImage(sourceCanvas, 0, 0, target.width, target.height);
+    return target.toDataURL("image/jpeg", 0.72);
   } catch {
     return null;
   }

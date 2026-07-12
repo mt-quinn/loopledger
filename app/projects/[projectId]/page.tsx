@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { PDFDocumentProxy } from "pdfjs-dist/legacy/build/pdf.mjs";
 import { useConvexAuth, useMutation, useQuery } from "convex/react";
 import { api } from "@/convex/_generated/api";
-import { getPdfPageMetrics, loadPdfFromBlob, renderPdfThumbnail } from "../../../lib/pdf";
+import { canvasToThumbnail, getPdfPageMetrics, loadPdfFromBlob } from "../../../lib/pdf";
 import { blobToBase64 } from "../../../lib/convex-upload";
 import { normalizeWorkspace } from "../../../lib/workspace-utils";
 import {
@@ -254,6 +254,7 @@ export default function ProjectEditorPage({
 
   const canvasRefs = useRef<(HTMLCanvasElement | null)[]>([]);
   const renderTasksRef = useRef<Map<number, { cancel: () => void }>>(new Map());
+  const thumbnailSentRef = useRef(false);
   const pageRefs = useRef<(HTMLElement | null)[]>([]);
   const viewerRef = useRef<HTMLDivElement | null>(null);
   const pagesLayerRef = useRef<HTMLDivElement | null>(null);
@@ -698,17 +699,6 @@ export default function ProjectEditorPage({
         if (currentProject.metadata.pageCount !== metrics.length) {
           void updatePageCountMutation({ projectId: currentProject.metadata.id, pageCount: metrics.length });
         }
-
-        if (!currentProject.metadata.thumbnailDataUrl) {
-          void renderPdfThumbnail(loadedPdf).then((thumbnailDataUrl) => {
-            if (thumbnailDataUrl && !cancelled) {
-              void setThumbnailMutation({
-                projectId: currentProject.metadata.id,
-                thumbnailDataUrl
-              }).catch(() => undefined);
-            }
-          });
-        }
       } catch {
         if (!cancelled) {
           setProjectStatus("error");
@@ -902,6 +892,25 @@ export default function ProjectEditorPage({
         renderTasks.set(pageIndex, task);
         try {
           await task.promise;
+          if (
+            pageIndex === 0 &&
+            !cancelled &&
+            !thumbnailSentRef.current &&
+            project &&
+            !project.metadata.thumbnailDataUrl
+          ) {
+            // First full paint of page 1 doubles as the library thumbnail.
+            const thumbnailDataUrl = canvasToThumbnail(canvas);
+            if (thumbnailDataUrl) {
+              thumbnailSentRef.current = true;
+              void setThumbnailMutation({
+                projectId: project.metadata.id,
+                thumbnailDataUrl
+              }).catch(() => {
+                thumbnailSentRef.current = false;
+              });
+            }
+          }
         } catch {
           // RenderingCancelledException: a newer render owns this canvas now.
         } finally {
@@ -921,7 +930,7 @@ export default function ProjectEditorPage({
       }
       renderTasks.clear();
     };
-  }, [pdfDoc, pages, zoom]);
+  }, [pdfDoc, pages, zoom, project, setThumbnailMutation]);
 
   const captureReferenceImage = useCallback((
     pageIndex: number,

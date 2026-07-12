@@ -1,0 +1,51 @@
+{
+  "pages": {
+    "/not-found": [
+      "static/chunks/webpack-901d24367f9d480a.js",
+      "static/chunks/fd9d1056-33527b3c3584f0a4.js",
+      "static/chunks/117-dda4c9e017bd2be5.js",
+      "static/chunks/main-app-04f7beb64dec22ad.js",
+      "static/chunks/app/not-found-953a7129bfb7ab47.js"
+    ],
+    "/_not-found/page": [
+      "static/chunks/webpack-901d24367f9d480a.js",
+      "static/chunks/fd9d1056-33527b3c3584f0a4.js",
+      "static/chunks/117-dda4c9e017bd2be5.js",
+      "static/chunks/main-app-04f7beb64dec22ad.js",
+      "static/chunks/app/_not-found/page-701e2d86e5488441.js"
+    ],
+    "/layout": [
+      "static/chunks/webpack-901d24367f9d480a.js",
+      "static/chunks/fd9d1056-33527b3c3584f0a4.js",
+      "static/chunks/117-dda4c9e017bd2be5.js",
+      "static/chunks/main-app-04f7beb64dec22ad.js",
+      "static/css/e298142966f27f34.css",
+      "static/chunks/988-6254c30e9f079916.js",
+      "static/chunks/26-0237de844e068f5d.js",
+      "static/chunks/app/layout-340071e23a733628.js"
+    ],
+    "/page": [
+      "static/chunks/webpack-901d24367f9d480a.js",
+      "static/chunks/fd9d1056-33527b3c3584f0a4.js",
+      "static/chunks/117-dda4c9e017bd2be5.js",
+      "static/chunks/main-app-04f7beb64dec22ad.js",
+      "static/chunks/988-6254c30e9f079916.js",
+      "static/chunks/186-5d0ccac353c94993.js",
+      "static/chunks/26-0237de844e068f5d.js",
+      "static/chunks/792-50d239bd390312c9.js",
+      "static/chunks/app/page-15f648e2e5b0c292.js"
+    ],
+    "/projects/[projectId]/page": [
+      "static/chunks/webpack-901d24367f9d480a.js",
+      "static/chunks/fd9d1056-33527b3c3584f0a4.js",
+      "static/chunks/117-dda4c9e017bd2be5.js",
+      "static/chunks/main-app-04f7beb64dec22ad.js",
+      "static/chunks/51fb665c-f1c7a44bbc5f8d64.js",
+      "static/chunks/988-6254c30e9f079916.js",
+      "static/chunks/186-5d0ccac353c94993.js",
+      "static/chunks/609-94224825804e0caa.js",
+      "static/chunks/792-50d239bd390312c9.js",
+      "static/chunks/app/projects/[projectId]/page-6261dd621be5ef01.js"
+    ]
+  }
+}

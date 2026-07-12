@@ -10,9 +10,12 @@ import {
   base64ToBlob,
   blobToBase64,
   computeBlobFingerprint,
+  knitAgain,
   saveWorkspaceToCloud,
+  uploadFinishedPhoto,
   uploadPdfProject
 } from "../lib/convex-upload";
+import { resizePhotoForUpload } from "../lib/image";
 import { migrateLocalProjects } from "../lib/migrate-local";
 import { deleteCachedProject } from "../lib/local-db";
 import { normalizeWorkspace } from "../lib/workspace-utils";
@@ -67,9 +70,14 @@ function HubInner({
   const projects = useQuery(api.projects.list);
   const renameProjectMutation = useMutation(api.projects.rename);
   const removeProjectMutation = useMutation(api.projects.remove);
+  const finishProjectMutation = useMutation(api.projects.finish);
+  const reactivateProjectMutation = useMutation(api.projects.reactivate);
+  const updateFinishedNotesMutation = useMutation(api.projects.updateFinishedNotes);
+  const removeFinishedPhotoMutation = useMutation(api.projects.removeFinishedPhoto);
 
   const pdfInputRef = useRef<HTMLInputElement | null>(null);
   const backupInputRef = useRef<HTMLInputElement | null>(null);
+  const photoInputRef = useRef<HTMLInputElement | null>(null);
   const migrationStartedRef = useRef(false);
   const accountBtnRef = useRef<HTMLButtonElement | null>(null);
   const cardMenuAnchorRef = useRef<HTMLButtonElement | null>(null);
@@ -94,6 +102,39 @@ function HubInner({
   const [editingProjectName, setEditingProjectName] = useState("");
   const [accountMenuOpen, setAccountMenuOpen] = useState(false);
   const [menuProjectId, setMenuProjectId] = useState<Id<"projects"> | null>(null);
+  const [tab, setTab] = useState<"active" | "finished">("active");
+  const [detailProjectId, setDetailProjectId] = useState<Id<"projects"> | null>(null);
+  const [notesDraft, setNotesDraft] = useState("");
+  const notesLoadedForRef = useRef<string | null>(null);
+
+  const finishedDetail = useQuery(
+    api.projects.finishedDetails,
+    detailProjectId ? { projectId: detailProjectId } : "skip"
+  );
+
+  useEffect(() => {
+    if (!detailProjectId || finishedDetail === undefined || finishedDetail === null) {
+      return;
+    }
+    if (notesLoadedForRef.current === detailProjectId) {
+      return;
+    }
+    notesLoadedForRef.current = detailProjectId;
+    setNotesDraft(finishedDetail.notes);
+  }, [detailProjectId, finishedDetail]);
+
+  useEffect(() => {
+    if (!detailProjectId || notesLoadedForRef.current !== detailProjectId) {
+      return;
+    }
+    if (finishedDetail === undefined || finishedDetail === null || notesDraft === finishedDetail.notes) {
+      return;
+    }
+    const timeoutId = window.setTimeout(() => {
+      void updateFinishedNotesMutation({ projectId: detailProjectId, notes: notesDraft }).catch(() => undefined);
+    }, 600);
+    return () => window.clearTimeout(timeoutId);
+  }, [notesDraft, detailProjectId, finishedDetail, updateFinishedNotesMutation]);
 
   useEffect(() => {
     if (migrationStartedRef.current) {
@@ -256,10 +297,114 @@ function HubInner({
     }
   }
 
+  function closeFinishedDetail() {
+    // Flush any notes typed within the debounce window.
+    if (detailProjectId && finishedDetail && notesDraft !== finishedDetail.notes) {
+      void updateFinishedNotesMutation({ projectId: detailProjectId, notes: notesDraft }).catch(() => undefined);
+    }
+    setDetailProjectId(null);
+    notesLoadedForRef.current = null;
+  }
+
+  function openFinishedDetail(projectId: Id<"projects">) {
+    notesLoadedForRef.current = null;
+    setNotesDraft("");
+    setDetailProjectId(projectId);
+  }
+
+  async function handleMarkFinished(projectId: Id<"projects">) {
+    setBusyAction(`finish:${projectId}`);
+    clearBanner();
+    try {
+      await finishProjectMutation({ projectId });
+      setTab("finished");
+      openFinishedDetail(projectId);
+    } catch {
+      showBanner("The project could not be marked as finished.", () => void handleMarkFinished(projectId));
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
+  async function handleReactivate(projectId: Id<"projects">) {
+    setBusyAction(`reactivate:${projectId}`);
+    clearBanner();
+    try {
+      await reactivateProjectMutation({ projectId });
+      closeFinishedDetail();
+      setTab("active");
+    } catch {
+      showBanner("The project could not be moved back to active.", () => void handleReactivate(projectId));
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
+  function nextCopyName(baseName: string): string {
+    const names = new Set((projects ?? []).map((project) => project.name));
+    let counter = 2;
+    while (names.has(`${baseName} (${counter})`)) {
+      counter += 1;
+    }
+    return `${baseName} (${counter})`;
+  }
+
+  async function handleKnitAgain(projectId: Id<"projects">, name: string) {
+    setBusyAction(`knitAgain:${projectId}`);
+    clearBanner();
+    try {
+      const result = await knitAgain(convex, projectId, nextCopyName(name));
+      router.push(`/projects/${result.projectId}`);
+    } catch {
+      showBanner("The pattern could not be cast on again.", () => void handleKnitAgain(projectId, name));
+      setBusyAction(null);
+    }
+  }
+
+  async function handlePhotoFiles(event: React.ChangeEvent<HTMLInputElement>) {
+    const files = Array.from(event.target.files ?? []);
+    event.target.value = "";
+    if (!detailProjectId || files.length === 0) {
+      return;
+    }
+
+    setBusyAction(`photo:${detailProjectId}`);
+    clearBanner();
+    try {
+      const remaining = (finishedDetail?.maxPhotos ?? 6) - (finishedDetail?.photos.length ?? 0);
+      for (const file of files.slice(0, Math.max(0, remaining))) {
+        const photoBlob = await resizePhotoForUpload(file);
+        await uploadFinishedPhoto(convex, detailProjectId, photoBlob);
+      }
+    } catch {
+      showBanner("A photo could not be uploaded. Check your connection and try again.");
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
+  async function handleRemovePhoto(storageId: Id<"_storage">) {
+    if (!detailProjectId || !window.confirm("Remove this photo?")) {
+      return;
+    }
+    try {
+      await removeFinishedPhotoMutation({ projectId: detailProjectId, storageId });
+    } catch {
+      showBanner("The photo could not be removed.");
+    }
+  }
+
   const hubStatus = projects === undefined ? "loading" : "ready";
   const projectCount = projects?.length ?? 0;
   const importBusy = busyAction === "import-pdf" || busyAction === "import-backup";
   const menuProject = projects?.find((project) => project.id === menuProjectId) ?? null;
+  const activeProjects = (projects ?? []).filter((project) => (project.status ?? "active") !== "finished");
+  const finishedProjects = (projects ?? [])
+    .filter((project) => project.status === "finished")
+    .sort((left, right) => (right.finishedAt ?? "").localeCompare(left.finishedAt ?? ""));
+  const shownProjects = tab === "active" ? activeProjects : finishedProjects;
+  const detailProject = projects?.find((project) => project.id === detailProjectId) ?? null;
+  const photoBusy = busyAction === `photo:${detailProjectId}`;
 
   return (
     <div className="hub">
@@ -271,6 +416,7 @@ function HubInner({
         hidden
         onChange={handleBackupImport}
       />
+      <input ref={photoInputRef} type="file" accept="image/*" multiple hidden onChange={handlePhotoFiles} />
 
       <header className="hub-header">
         <div className="hub-brand">
@@ -279,7 +425,9 @@ function HubInner({
           <p className="hub-count">
             {hubStatus === "loading"
               ? "Loading your library"
-              : `${projectCount} ${projectCount === 1 ? "pattern" : "patterns"}`}
+              : finishedProjects.length > 0
+                ? `${activeProjects.length} on the needles · ${finishedProjects.length} finished`
+                : `${projectCount} ${projectCount === 1 ? "pattern" : "patterns"}`}
           </p>
         </div>
 
@@ -308,6 +456,31 @@ function HubInner({
           </button>
         </div>
       </header>
+
+      {hubStatus === "ready" && (finishedProjects.length > 0 || tab === "finished") ? (
+        <div className="hub-tabs" role="tablist" aria-label="Project status">
+          <button
+            type="button"
+            role="tab"
+            aria-selected={tab === "active"}
+            className={`hub-tab${tab === "active" ? " active" : ""}`}
+            onClick={() => setTab("active")}
+          >
+            Active
+            <span className="hub-tab-count">{activeProjects.length}</span>
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={tab === "finished"}
+            className={`hub-tab${tab === "finished" ? " active" : ""}`}
+            onClick={() => setTab("finished")}
+          >
+            Finished
+            <span className="hub-tab-count">{finishedProjects.length}</span>
+          </button>
+        </div>
+      ) : null}
 
       {bannerMessage ? (
         <div className="hub-notice" role="status">
@@ -339,7 +512,45 @@ function HubInner({
         </div>
       ) : null}
 
-      {hubStatus === "ready" && projectCount === 0 ? (
+      {hubStatus === "ready" && tab === "finished" && finishedProjects.length === 0 ? (
+        <div className="hub-empty">
+          <div className="hub-empty-mark" aria-hidden="true">
+            🎉
+          </div>
+          <h2 className="hub-empty-title">Nothing finished yet</h2>
+          <p className="hub-empty-text">
+            When you cast off, open a project&apos;s menu and mark it finished. It moves here, where you can add photos
+            of the finished piece and notes about yarn, needles, and mods.
+          </p>
+        </div>
+      ) : null}
+
+      {hubStatus === "ready" && tab === "active" && projectCount > 0 && activeProjects.length === 0 ? (
+        <div className="hub-empty">
+          <div className="hub-empty-mark" aria-hidden="true">
+            🧶
+          </div>
+          <h2 className="hub-empty-title">Nothing on the needles</h2>
+          <p className="hub-empty-text">
+            Import a new pattern, or visit your Finished shelf and knit an old favorite again.
+          </p>
+          <div className="hub-empty-actions">
+            <button
+              type="button"
+              className="hub-btn hub-btn-primary"
+              onClick={() => pdfInputRef.current?.click()}
+              disabled={importBusy}
+            >
+              Import a PDF
+            </button>
+            <button type="button" className="hub-btn hub-btn-ghost" onClick={() => setTab("finished")}>
+              Browse finished
+            </button>
+          </div>
+        </div>
+      ) : null}
+
+      {hubStatus === "ready" && tab === "active" && projectCount === 0 ? (
         <div className="hub-empty">
           <div className="hub-empty-mark" aria-hidden="true">
             🧶
@@ -370,21 +581,29 @@ function HubInner({
         </div>
       ) : null}
 
-      {hubStatus === "ready" && projectCount > 0 ? (
+      {hubStatus === "ready" && shownProjects.length > 0 ? (
         <div className="hub-grid">
-          {projects!.map((project, index) => (
+          {shownProjects.map((project, index) => (
             <article
               key={project.id}
-              className="project-card"
+              className={`project-card${project.status === "finished" ? " project-card-finished" : ""}`}
               style={{ animationDelay: `${Math.min(index, 8) * 55}ms` }}
               onClick={() => {
-                if (editingProjectId !== project.id) {
+                if (editingProjectId === project.id) {
+                  return;
+                }
+                if (project.status === "finished") {
+                  openFinishedDetail(project.id);
+                } else {
                   router.push(`/projects/${project.id}`);
                 }
               }}
             >
               <div className="project-card-thumb" aria-hidden="true">
-                {project.thumbnailDataUrl ? (
+                {project.status === "finished" && project.finishedCoverUrl ? (
+                  // eslint-disable-next-line @next/next/no-img-element
+                  <img src={project.finishedCoverUrl} alt="" loading="lazy" />
+                ) : project.thumbnailDataUrl ? (
                   // eslint-disable-next-line @next/next/no-img-element
                   <img src={project.thumbnailDataUrl} alt="" loading="lazy" />
                 ) : (
@@ -394,10 +613,14 @@ function HubInner({
 
               <div className="project-card-main">
                 <div className="project-card-head">
-                  <span className="project-card-badge">
-                    {project.pageCount > 0
-                      ? `${project.pageCount} ${project.pageCount === 1 ? "page" : "pages"}`
-                      : "PDF"}
+                  <span
+                    className={`project-card-badge${project.status === "finished" ? " badge-finished" : ""}`}
+                  >
+                    {project.status === "finished"
+                      ? "✓ Finished"
+                      : project.pageCount > 0
+                        ? `${project.pageCount} ${project.pageCount === 1 ? "page" : "pages"}`
+                        : "PDF"}
                   </span>
                   <button
                     type="button"
@@ -439,7 +662,11 @@ function HubInner({
                   <p className="project-card-file">{project.sourceFileName}</p>
                 </div>
 
-                <p className="project-card-meta">Last opened {formatProjectTime(project.lastOpenedAt)}</p>
+                <p className="project-card-meta">
+                  {project.status === "finished"
+                    ? `Finished ${formatProjectTime(project.finishedAt ?? project.updatedAt)}`
+                    : `Last opened ${formatProjectTime(project.lastOpenedAt)}`}
+                </p>
               </div>
             </article>
           ))}
@@ -506,18 +733,95 @@ function HubInner({
       >
         {menuProject ? (
           <div className="menu-list">
-            <button
-              type="button"
-              className="menu-item"
-              onClick={() => {
-                router.push(`/projects/${menuProject.id}`);
-              }}
-            >
-              <span className="menu-item-glyph" aria-hidden="true">
-                ▸
-              </span>
-              Open
-            </button>
+            {menuProject.status === "finished" ? (
+              <>
+                <button
+                  type="button"
+                  className="menu-item"
+                  onClick={() => {
+                    setMenuProjectId(null);
+                    openFinishedDetail(menuProject.id);
+                  }}
+                >
+                  <span className="menu-item-glyph" aria-hidden="true">
+                    🖼
+                  </span>
+                  Photos &amp; notes
+                </button>
+                <button
+                  type="button"
+                  className="menu-item"
+                  onClick={() => {
+                    router.push(`/projects/${menuProject.id}`);
+                  }}
+                >
+                  <span className="menu-item-glyph" aria-hidden="true">
+                    ▸
+                  </span>
+                  Open pattern
+                </button>
+                <button
+                  type="button"
+                  className="menu-item"
+                  onClick={() => {
+                    const project = menuProject;
+                    setMenuProjectId(null);
+                    void handleKnitAgain(project.id, project.name);
+                  }}
+                  disabled={busyAction === `knitAgain:${menuProject.id}`}
+                >
+                  <span className="menu-item-glyph" aria-hidden="true">
+                    ↻
+                  </span>
+                  {busyAction === `knitAgain:${menuProject.id}` ? "Casting on…" : "Knit again"}
+                </button>
+                <button
+                  type="button"
+                  className="menu-item"
+                  onClick={() => {
+                    const id = menuProject.id;
+                    setMenuProjectId(null);
+                    void handleReactivate(id);
+                  }}
+                  disabled={busyAction === `reactivate:${menuProject.id}`}
+                >
+                  <span className="menu-item-glyph" aria-hidden="true">
+                    ↩
+                  </span>
+                  Back to active
+                </button>
+              </>
+            ) : (
+              <>
+                <button
+                  type="button"
+                  className="menu-item"
+                  onClick={() => {
+                    router.push(`/projects/${menuProject.id}`);
+                  }}
+                >
+                  <span className="menu-item-glyph" aria-hidden="true">
+                    ▸
+                  </span>
+                  Open
+                </button>
+                <button
+                  type="button"
+                  className="menu-item"
+                  onClick={() => {
+                    const id = menuProject.id;
+                    setMenuProjectId(null);
+                    void handleMarkFinished(id);
+                  }}
+                  disabled={busyAction === `finish:${menuProject.id}`}
+                >
+                  <span className="menu-item-glyph" aria-hidden="true">
+                    ✓
+                  </span>
+                  {busyAction === `finish:${menuProject.id}` ? "Finishing…" : "Mark as finished"}
+                </button>
+              </>
+            )}
             <button
               type="button"
               className="menu-item"
@@ -563,6 +867,92 @@ function HubInner({
               Delete
             </button>
           </div>
+        ) : null}
+      </Panel>
+
+      <Panel
+        open={detailProject !== null}
+        onClose={closeFinishedDetail}
+        title={detailProject?.name}
+        width={440}
+        className="finished-panel"
+      >
+        {detailProject ? (
+          <>
+            <p className="finished-date">
+              {detailProject.finishedAt
+                ? `Finished ${formatProjectTime(detailProject.finishedAt)}`
+                : "Finished"}
+            </p>
+
+            <div className="finished-gallery">
+              {(finishedDetail?.photos ?? []).map((photo) => (
+                <div key={photo.storageId} className="finished-photo">
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img src={photo.url} alt="Finished project" loading="lazy" />
+                  <button
+                    type="button"
+                    className="finished-photo-remove"
+                    onClick={() => void handleRemovePhoto(photo.storageId)}
+                    aria-label="Remove photo"
+                  >
+                    ✕
+                  </button>
+                </div>
+              ))}
+              {(finishedDetail?.photos.length ?? 0) < (finishedDetail?.maxPhotos ?? 6) ? (
+                <button
+                  type="button"
+                  className="finished-photo-add"
+                  onClick={() => photoInputRef.current?.click()}
+                  disabled={photoBusy || finishedDetail === undefined}
+                >
+                  <span className="finished-photo-add-glyph" aria-hidden="true">
+                    {photoBusy ? "…" : "＋"}
+                  </span>
+                  {photoBusy ? "Uploading" : "Add photo"}
+                </button>
+              ) : null}
+            </div>
+
+            <label className="finished-notes-field">
+              <span>Notes</span>
+              <textarea
+                className="finished-notes"
+                rows={4}
+                placeholder="Yarn, needles, mods, who it was for…"
+                value={notesDraft}
+                onChange={(event) => setNotesDraft(event.target.value)}
+                disabled={finishedDetail === undefined}
+              />
+            </label>
+
+            <div className="finished-actions">
+              <button
+                type="button"
+                className="hub-btn hub-btn-primary"
+                onClick={() => router.push(`/projects/${detailProject.id}`)}
+              >
+                Open pattern
+              </button>
+              <button
+                type="button"
+                className="hub-btn hub-btn-ghost"
+                onClick={() => void handleKnitAgain(detailProject.id, detailProject.name)}
+                disabled={busyAction === `knitAgain:${detailProject.id}`}
+              >
+                {busyAction === `knitAgain:${detailProject.id}` ? "Casting on…" : "Knit again"}
+              </button>
+              <button
+                type="button"
+                className="hub-btn hub-btn-ghost"
+                onClick={() => void handleReactivate(detailProject.id)}
+                disabled={busyAction === `reactivate:${detailProject.id}`}
+              >
+                Back to active
+              </button>
+            </div>
+          </>
         ) : null}
       </Panel>
     </div>

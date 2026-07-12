@@ -79,6 +79,8 @@ export type ProjectWorkspace = {
   anchors: ScrollAnchor[];
 };
 
+export type ProjectStatus = "active" | "finished";
+
 export type ProjectMetadata = {
   id: string;
   name: string;
@@ -89,6 +91,9 @@ export type ProjectMetadata = {
   lastOpenedAt: string;
   pageCount: number;
   thumbnailDataUrl?: string;
+  status?: ProjectStatus;
+  finishedAt?: string;
+  finishedNotes?: string;
 };
 
 export type PageLook = "normal" | "dimmed" | "inverted";
