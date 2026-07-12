@@ -88,17 +88,10 @@ export type ProjectMetadata = {
   updatedAt: string;
   lastOpenedAt: string;
   pageCount: number;
+  thumbnailDataUrl?: string;
 };
 
-export type StoredProjectFile = {
-  projectId: string;
-  pdfBlob: Blob;
-};
-
-export type StoredProjectWorkspace = {
-  projectId: string;
-  workspace: ProjectWorkspace;
-};
+export type PageLook = "normal" | "dimmed" | "inverted";
 
 export type ProjectRecord = {
   metadata: ProjectMetadata;
@@ -115,28 +108,27 @@ export type ProjectBackup = {
   pdfMimeType: string;
 };
 
-export const LEGACY_STORAGE_KEY = "whichstitch-pdf-workspace-v1";
 export const THEME_KEY = "whichstitch-theme-v1";
+export const PAGE_LOOK_KEY = "whichstitch-page-look-v1";
+export const LINK_HINT_KEY = "whichstitch-link-hint-v1";
 export const MIN_ZOOM = 0.5;
 export const MAX_ZOOM = 10;
 export const COUNTER_HITBOX_WIDTH = 150;
 export const COUNTER_HITBOX_HEIGHT = 140;
 export const COUNTER_GAP = 12;
 export const MAX_REFERENCE_IMAGE_DIM = 900;
-export const DEFAULT_STROKE_COLOR = "#c62828";
+export const DEFAULT_STROKE_COLOR = "#d64045";
+// Curated to read clearly on white pattern pages (and inverted pages) while
+// sitting comfortably with the app's muted sage/cream identity.
 export const STROKE_PALETTE = [
-  "#ff1744",
-  "#ff6d00",
-  "#ffea00",
-  "#76ff03",
-  "#00e676",
-  "#00e5ff",
-  "#00b0ff",
-  "#2979ff",
-  "#651fff",
-  "#d500f9",
-  "#f50057",
-  "#ff4081"
+  "#d64045", // red
+  "#e07a1f", // orange
+  "#c9a227", // marigold
+  "#3e8e5a", // green
+  "#2a9d8f", // teal
+  "#3a6ea5", // blue
+  "#7b5ea7", // violet
+  "#c2559d" // magenta
 ];
 
 export function createDefaultGaugeCalculator(): GaugeCalculatorState {

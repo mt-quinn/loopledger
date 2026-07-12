@@ -64,6 +64,49 @@ export default function Panel({
   const [mounted, setMounted] = useState(false);
   const [position, setPosition] = useState<PopoverPosition | null>(null);
   const panelRef = useRef<HTMLDivElement | null>(null);
+  const sheetDragRef = useRef<{ startY: number; pointerId: number } | null>(null);
+
+  const onSheetDragStart = useCallback(
+    (event: React.PointerEvent) => {
+      if (!isPhone) {
+        return;
+      }
+      sheetDragRef.current = { startY: event.clientY, pointerId: event.pointerId };
+      (event.currentTarget as HTMLElement).setPointerCapture(event.pointerId);
+    },
+    [isPhone]
+  );
+
+  const onSheetDragMove = useCallback((event: React.PointerEvent) => {
+    const drag = sheetDragRef.current;
+    const sheet = panelRef.current;
+    if (!drag || !sheet || event.pointerId !== drag.pointerId) {
+      return;
+    }
+    const dy = Math.max(0, event.clientY - drag.startY);
+    sheet.style.transform = dy > 0 ? `translateY(${dy}px)` : "";
+    sheet.style.transition = "none";
+  }, []);
+
+  const onSheetDragEnd = useCallback(
+    (event: React.PointerEvent) => {
+      const drag = sheetDragRef.current;
+      const sheet = panelRef.current;
+      sheetDragRef.current = null;
+      if (!drag || !sheet || event.pointerId !== drag.pointerId) {
+        return;
+      }
+      const dy = event.clientY - drag.startY;
+      sheet.style.transition = "";
+      if (dy > 90) {
+        sheet.style.transform = "";
+        onClose();
+      } else {
+        sheet.style.transform = "";
+      }
+    },
+    [onClose]
+  );
 
   useEffect(() => {
     setMounted(true);
@@ -189,7 +232,17 @@ export default function Panel({
         className={`panel ${isPhone ? "panel-sheet" : "panel-popover"} ${className ?? ""}`}
         style={popoverStyle}
       >
-        {isPhone ? <div className="panel-grabber" aria-hidden="true" /> : null}
+        {isPhone ? (
+          <div
+            className="panel-grabber-zone"
+            onPointerDown={onSheetDragStart}
+            onPointerMove={onSheetDragMove}
+            onPointerUp={onSheetDragEnd}
+            onPointerCancel={onSheetDragEnd}
+          >
+            <div className="panel-grabber" aria-hidden="true" />
+          </div>
+        ) : null}
         {title ? (
           <div className="panel-head">
             <h2 className="panel-title">{title}</h2>

@@ -1,6 +1,6 @@
 "use client";
 
-import type { Ref, RefObject } from "react";
+import { useEffect, useRef, useState, type Ref, type RefObject } from "react";
 
 type ViewerMode = "pan" | "highlight";
 
@@ -47,10 +47,50 @@ function DockButton({
   );
 }
 
+export type SaveStatus = "saved" | "saving" | "error" | "offline";
+
+const SAVE_STATUS_TEXT: Record<SaveStatus, string> = {
+  saved: "Saved ✓",
+  saving: "Saving…",
+  error: "Not saved",
+  offline: "Offline"
+};
+
+/**
+ * Error and offline states stay pinned; "Saved ✓" only flashes briefly after a
+ * save completes so the topbar stays quiet during normal work.
+ */
+function useTransientSaveChip(saveStatus: SaveStatus): boolean {
+  const [visible, setVisible] = useState(false);
+  const previousRef = useRef<SaveStatus>(saveStatus);
+
+  useEffect(() => {
+    const previous = previousRef.current;
+    previousRef.current = saveStatus;
+
+    if (saveStatus !== "saved") {
+      setVisible(true);
+      return;
+    }
+    if (previous === "saving" || previous === "error" || previous === "offline") {
+      setVisible(true);
+      const timeoutId = window.setTimeout(() => setVisible(false), 1600);
+      return () => window.clearTimeout(timeoutId);
+    }
+    setVisible(false);
+  }, [saveStatus]);
+
+  return visible;
+}
+
 export type EditorChromeProps = {
   toolbarRef: Ref<HTMLElement>;
   projectName: string;
   sourceFileName: string;
+  saveStatus: SaveStatus;
+  activeToolGlyph: string;
+  activeToolLabel: string;
+  activeToolColor: string;
   onBack: () => void;
   theme: "light" | "dark";
   onToggleTheme: () => void;
@@ -86,6 +126,10 @@ export default function EditorChrome({
   toolbarRef,
   projectName,
   sourceFileName,
+  saveStatus,
+  activeToolGlyph,
+  activeToolLabel,
+  activeToolColor,
   onBack,
   theme,
   onToggleTheme,
@@ -117,6 +161,7 @@ export default function EditorChrome({
   moreButtonRef
 }: EditorChromeProps) {
   const isMarkup = mode === "highlight";
+  const chipVisible = useTransientSaveChip(saveStatus);
 
   return (
     <>
@@ -138,6 +183,19 @@ export default function EditorChrome({
         </div>
 
         <div className="topbar-actions">
+          <span
+            className={`topbar-save-status is-${saveStatus}${chipVisible ? "" : " is-hidden"}`}
+            role="status"
+            title={
+              saveStatus === "offline"
+                ? "You're offline. Changes are stored on this device and will sync when you're back online."
+                : saveStatus === "error"
+                  ? "Your latest changes could not be saved to your account."
+                  : undefined
+            }
+          >
+            {SAVE_STATUS_TEXT[saveStatus]}
+          </span>
           <button
             type="button"
             className="topbar-icon-btn"
@@ -157,6 +215,7 @@ export default function EditorChrome({
             className={`dock-mode-btn${!isMarkup ? " active" : ""}`}
             onClick={() => onSetMode("pan")}
             aria-pressed={!isMarkup}
+            aria-label="Pan mode"
           >
             <span className="dock-glyph" aria-hidden="true">
               ❏
@@ -168,6 +227,7 @@ export default function EditorChrome({
             className={`dock-mode-btn${isMarkup ? " active" : ""}`}
             onClick={() => onSetMode("highlight")}
             aria-pressed={isMarkup}
+            aria-label="Mark up mode"
           >
             <span className="dock-glyph" aria-hidden="true">
               ✎
@@ -177,14 +237,20 @@ export default function EditorChrome({
         </div>
 
         <div className="dock-items">
-          <DockButton
-            glyph="🖌"
-            label="Tools"
-            active={isToolsOpen}
+          <button
+            ref={toolsButtonRef}
+            type="button"
+            className={`dock-btn${isToolsOpen ? " active" : ""}`}
             onClick={onToggleTools}
-            buttonRef={toolsButtonRef}
-            ariaExpanded={isToolsOpen}
-          />
+            aria-expanded={isToolsOpen}
+            aria-label={isMarkup ? `Tools — ${activeToolLabel} selected` : "Tools"}
+          >
+            <span className="dock-glyph dock-tool-glyph" aria-hidden="true">
+              {isMarkup ? activeToolGlyph : "🖌"}
+              {isMarkup ? <span className="dock-tool-color" style={{ background: activeToolColor }} /> : null}
+            </span>
+            <span className="dock-label">{isMarkup ? activeToolLabel : "Tools"}</span>
+          </button>
           <DockButton
             glyph="＋"
             label="Counter"
@@ -195,7 +261,7 @@ export default function EditorChrome({
           />
           <DockButton
             glyph="⊕"
-            label="Zoom"
+            label="View"
             value={`${zoomPercent}%`}
             active={isZoomOpen}
             onClick={onToggleZoom}
@@ -203,8 +269,8 @@ export default function EditorChrome({
             ariaExpanded={isZoomOpen}
           />
           <DockButton
-            glyph="📋"
-            label="Index"
+            glyph="🔖"
+            label="Bookmarks"
             secondary
             active={isIndexOpen}
             onClick={onToggleIndex}

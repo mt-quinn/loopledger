@@ -1,9 +1,13 @@
 import { ConvexHttpClient } from "convex/browser";
 import { api } from "../convex/_generated/api.js";
 
-const URL = process.env.CONVEX_URL || "https://wry-donkey-777.convex.cloud";
-const EMAIL = "tester@loopledger.test";
-const PASSWORD = "testpassword123";
+const URL = process.env.CONVEX_URL;
+if (!URL) {
+  console.error("Set CONVEX_URL to your deployment URL (see NEXT_PUBLIC_CONVEX_URL in .env.local).");
+  process.exit(1);
+}
+const EMAIL = process.env.SEED_EMAIL || "tester@loopledger.test";
+const PASSWORD = process.env.SEED_PASSWORD || "testpassword123";
 
 function buildPdf(pageCount) {
   const objects = [];
@@ -101,9 +105,10 @@ async function main() {
     workspace: {
       zoom: 1.1,
       annotations: [],
+      // Counter positions are in PDF points (the pages are 612x792).
       counters: [
-        { id: "c1", pageIndex: 0, x: 0.18, y: 0.32, type: "row", label: "Body rows", value: 12 },
-        { id: "c2", pageIndex: 0, x: 0.6, y: 0.55, type: "stitch", label: "Repeat", value: 4 }
+        { id: "c1", pageIndex: 0, x: 90, y: 250, type: "row", label: "Body rows", value: 12 },
+        { id: "c2", pageIndex: 0, x: 340, y: 430, type: "stitch", label: "Repeat", value: 4 }
       ],
       connections: [],
       referenceCapture: null,

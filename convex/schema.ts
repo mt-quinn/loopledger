@@ -16,7 +16,9 @@ export default defineSchema({
     lastOpenedAt: v.string(),
     pageCount: v.number(),
     pdfStorageId: v.id("_storage"),
-    pdfMimeType: v.string()
+    pdfMimeType: v.string(),
+    // Small page-1 preview (JPEG data URL) shown on library cards.
+    thumbnailDataUrl: v.optional(v.string())
   })
     .index("by_user", ["userId"])
     .index("by_user_and_fingerprint", ["userId", "fingerprint"]),

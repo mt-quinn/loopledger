@@ -17,8 +17,10 @@ export default function AuthForm({
   const [flow, setFlow] = useState<AuthFlow>("signIn");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [showPassword, setShowPassword] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
 
   async function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -81,17 +83,48 @@ export default function AuthForm({
           </label>
           <label className="auth-field">
             <span>Password</span>
-            <input
-              className="auth-input"
-              type="password"
-              autoComplete={flow === "signIn" ? "current-password" : "new-password"}
-              required
-              minLength={8}
-              value={password}
-              onChange={(event) => setPassword(event.target.value)}
-              placeholder={flow === "signIn" ? "Your password" : "At least 8 characters"}
-            />
+            <div className="auth-password-wrap">
+              <input
+                className="auth-input"
+                type={showPassword ? "text" : "password"}
+                autoComplete={flow === "signIn" ? "current-password" : "new-password"}
+                required
+                minLength={8}
+                value={password}
+                onChange={(event) => setPassword(event.target.value)}
+                placeholder={flow === "signIn" ? "Your password" : "At least 8 characters"}
+              />
+              <button
+                type="button"
+                className="auth-password-toggle"
+                onClick={() => setShowPassword((current) => !current)}
+                aria-label={showPassword ? "Hide password" : "Show password"}
+                aria-pressed={showPassword}
+              >
+                {showPassword ? "Hide" : "Show"}
+              </button>
+            </div>
           </label>
+
+          {flow === "signIn" ? (
+            <button
+              type="button"
+              className="auth-link auth-forgot"
+              onClick={() =>
+                setNotice(
+                  "Password reset isn't available yet — it's coming soon. Your patterns stay safe in your account."
+                )
+              }
+            >
+              Forgot your password?
+            </button>
+          ) : null}
+
+          {notice ? (
+            <p className="auth-notice" role="status">
+              {notice}
+            </p>
+          ) : null}
 
           <button type="submit" className="hub-btn hub-btn-primary auth-submit" disabled={submitting}>
             {submitting
@@ -114,6 +147,7 @@ export default function AuthForm({
                 onClick={() => {
                   setFlow("signUp");
                   setError(null);
+                  setNotice(null);
                 }}
               >
                 Create an account
@@ -128,6 +162,7 @@ export default function AuthForm({
                 onClick={() => {
                   setFlow("signIn");
                   setError(null);
+                  setNotice(null);
                 }}
               >
                 Sign in

@@ -16,11 +16,28 @@ export type UploadMetadata = {
   pdfMimeType: string;
 };
 
+export async function computeBlobFingerprint(blob: Blob): Promise<string> {
+  const hashBuffer = await crypto.subtle.digest("SHA-256", await blob.arrayBuffer());
+  return Array.from(new Uint8Array(hashBuffer))
+    .map((value) => value.toString(16).padStart(2, "0"))
+    .join("");
+}
+
 export async function uploadPdfProject(
   convex: ConvexReactClient,
   pdfBlob: Blob,
   meta: UploadMetadata
 ): Promise<UploadResult> {
+  // Skip the upload entirely when this exact PDF is already in the account.
+  // Fail open: createFromPdf still dedupes server-side as a safety net.
+  const existing = await convex
+    .query(api.projects.findByFingerprint, { fingerprint: meta.fingerprint })
+    .catch(() => null);
+  if (existing) {
+    await convex.mutation(api.projects.touch, { projectId: existing.projectId });
+    return { projectId: existing.projectId, isExisting: true };
+  }
+
   const uploadUrl = await convex.mutation(api.projects.generateUploadUrl, {});
   const response = await fetch(uploadUrl, {
     method: "POST",

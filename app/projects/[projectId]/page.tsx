@@ -4,17 +4,25 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { PDFDocumentProxy } from "pdfjs-dist/legacy/build/pdf.mjs";
 import { useConvexAuth, useMutation, useQuery } from "convex/react";
 import { api } from "@/convex/_generated/api";
-import { getPdfPageMetrics, loadPdfFromBlob } from "../../../lib/pdf";
+import { getPdfPageMetrics, loadPdfFromBlob, renderPdfThumbnail } from "../../../lib/pdf";
 import { blobToBase64 } from "../../../lib/convex-upload";
-import { normalizeWorkspace } from "../../../lib/project-store";
+import { normalizeWorkspace } from "../../../lib/workspace-utils";
+import {
+  markCachedWorkspaceClean,
+  readCachedProject,
+  writeCachedProject,
+  writeCachedWorkspace
+} from "../../../lib/local-db";
 import {
   COUNTER_GAP,
   COUNTER_HITBOX_HEIGHT,
   COUNTER_HITBOX_WIDTH,
   DEFAULT_STROKE_COLOR,
+  LINK_HINT_KEY,
   MAX_REFERENCE_IMAGE_DIM,
   MAX_ZOOM,
   MIN_ZOOM,
+  PAGE_LOOK_KEY,
   STROKE_PALETTE,
   type Annotation,
   type CounterConnection,
@@ -23,8 +31,10 @@ import {
   type DrawingTool,
   type GaugeCalculatorState,
   type KnitCounter,
+  type PageLook,
   type PageMetric,
   type ProjectRecord,
+  type ProjectWorkspace,
   type ReferenceCapture,
   type ScrollAnchor,
   type ViewerMode,
@@ -47,8 +57,15 @@ const ANNOTATE_TOOLS: { id: AnnotateTool; glyph: string; label: string }[] = [
   { id: "eraser", glyph: "⌫", label: "Eraser" }
 ];
 
+// iOS Safari caps a single canvas around 16.7M pixels; stay under it.
+const MAX_CANVAS_PIXELS = 16 * 1024 * 1024;
+
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
+}
+
+function createId(prefix: string): string {
+  return `${prefix}-${crypto.randomUUID()}`;
 }
 
 function formatCounterLabel(type: CounterType): string {
@@ -189,9 +206,11 @@ export default function ProjectEditorPage({
   const touchProjectMutation = useMutation(api.projects.touch);
   const saveWorkspaceMutation = useMutation(api.projects.saveWorkspace);
   const updatePageCountMutation = useMutation(api.projects.updatePageCount);
+  const setThumbnailMutation = useMutation(api.projects.setThumbnail);
   const [project, setProject] = useState<ProjectRecord | null>(null);
   const [projectStatus, setProjectStatus] = useState<"loading" | "ready" | "missing" | "error">("loading");
-  const [, setSaveStatus] = useState<"saved" | "saving" | "error">("saved");
+  const [saveStatus, setSaveStatus] = useState<"saved" | "saving" | "error">("saved");
+  const [isOffline, setIsOffline] = useState(false);
   const [isExporting, setIsExporting] = useState(false);
   const [pdfDoc, setPdfDoc] = useState<PDFDocumentProxy | null>(null);
   const [pages, setPages] = useState<PageMetric[]>([]);
@@ -215,12 +234,26 @@ export default function ProjectEditorPage({
   const [isMoreOpen, setIsMoreOpen] = useState(false);
   const [counters, setCounters] = useState<KnitCounter[]>([]);
   const [connections, setConnections] = useState<CounterConnection[]>([]);
+  const [pageLook, setPageLook] = useState<PageLook>("normal");
+  const [toast, setToast] = useState<{
+    message: string;
+    actionLabel?: string;
+    onAction?: () => void;
+  } | null>(null);
+  const toastTimeoutRef = useRef<number | null>(null);
+  const [linkSourceId, setLinkSourceId] = useState<string | null>(null);
+  const [currentPageNumber, setCurrentPageNumber] = useState(1);
+  const [isPagePillVisible, setIsPagePillVisible] = useState(false);
+  const pagePillTimeoutRef = useRef<number | null>(null);
+  const [isPageJumpOpen, setIsPageJumpOpen] = useState(false);
+  const pagePillRef = useRef<HTMLButtonElement>(null);
   const [editingCounterId, setEditingCounterId] = useState<string | null>(null);
   const [editingCounterTitle, setEditingCounterTitle] = useState("");
   const [focusCounterId, setFocusCounterId] = useState<string | null>(null);
   const [toolbarHeight, setToolbarHeight] = useState(64);
 
   const canvasRefs = useRef<(HTMLCanvasElement | null)[]>([]);
+  const renderTasksRef = useRef<Map<number, { cancel: () => void }>>(new Map());
   const pageRefs = useRef<(HTMLElement | null)[]>([]);
   const viewerRef = useRef<HTMLDivElement | null>(null);
   const pagesLayerRef = useRef<HTMLDivElement | null>(null);
@@ -312,6 +345,7 @@ export default function ProjectEditorPage({
   const moreButtonRef = useRef<HTMLButtonElement>(null);
   const toolbarRef = useRef<HTMLElement>(null);
   const hydratedWorkspaceRef = useRef(false);
+  const hydratedFromCacheRef = useRef(false);
   const latestWorkspaceRef = useRef({
     zoom,
     annotations: highlights,
@@ -332,11 +366,83 @@ export default function ProjectEditorPage({
     setEditingTextAnnotationId(null);
   }, []);
 
+  const dismissToast = useCallback(() => {
+    if (toastTimeoutRef.current !== null) {
+      window.clearTimeout(toastTimeoutRef.current);
+      toastTimeoutRef.current = null;
+    }
+    setToast(null);
+  }, []);
+
+  const showToast = useCallback(
+    (message: string, options?: { actionLabel?: string; onAction?: () => void; duration?: number }) => {
+      if (toastTimeoutRef.current !== null) {
+        window.clearTimeout(toastTimeoutRef.current);
+      }
+      setToast({ message, actionLabel: options?.actionLabel, onAction: options?.onAction });
+      toastTimeoutRef.current = window.setTimeout(() => {
+        setToast(null);
+        toastTimeoutRef.current = null;
+      }, options?.duration ?? 5000);
+    },
+    []
+  );
+
   useEffect(() => {
+    const stored = window.localStorage.getItem(PAGE_LOOK_KEY);
+    if (stored === "dimmed" || stored === "inverted") {
+      setPageLook(stored);
+    }
+  }, []);
+
+  function updatePageLook(look: PageLook) {
+    setPageLook(look);
+    window.localStorage.setItem(PAGE_LOOK_KEY, look);
+  }
+
+  const applyFitWidth = useCallback(() => {
+    const viewer = viewerRef.current;
+    const page = pages[0];
+    if (!viewer || !page) {
+      return;
+    }
+    setZoom(clamp((viewer.clientWidth - 28) / page.width, MIN_ZOOM, MAX_ZOOM));
+  }, [pages]);
+
+  function scrollToPage(pageIndex: number) {
+    const viewer = viewerRef.current;
+    const pageElement = pageRefs.current[pageIndex];
+    if (!viewer || !pageElement) {
+      return;
+    }
+    const viewerRect = viewer.getBoundingClientRect();
+    const rect = pageElement.getBoundingClientRect();
+    const target = rect.top - viewerRect.top + viewer.scrollTop - (toolbarHeight + 14);
+    viewer.scrollTo({ top: Math.max(0, target), behavior: "smooth" });
+  }
+
+  useEffect(() => {
+    // Offline, auth can't be confirmed against the server — stay put so the
+    // cached copy of the project remains usable.
+    if (typeof navigator !== "undefined" && !navigator.onLine) {
+      return;
+    }
     if (!isAuthLoading && !isAuthenticated) {
       router.replace("/");
     }
   }, [isAuthLoading, isAuthenticated, router]);
+
+  useEffect(() => {
+    setIsOffline(typeof navigator !== "undefined" && !navigator.onLine);
+    const onOnline = () => setIsOffline(false);
+    const onOffline = () => setIsOffline(true);
+    window.addEventListener("online", onOnline);
+    window.addEventListener("offline", onOffline);
+    return () => {
+      window.removeEventListener("online", onOnline);
+      window.removeEventListener("offline", onOffline);
+    };
+  }, []);
 
   useEffect(() => {
     latestWorkspaceRef.current = {
@@ -386,14 +492,44 @@ export default function ProjectEditorPage({
     };
   }, []);
 
+  const applyLoadedProject = useCallback(
+    (metadata: ProjectRecord["metadata"], pdfBlob: Blob, workspace: ProjectWorkspace) => {
+      latestWorkspaceRef.current = {
+        zoom: clamp(workspace.zoom, MIN_ZOOM, MAX_ZOOM),
+        annotations: workspace.annotations,
+        counters: workspace.counters,
+        connections: workspace.connections,
+        referenceCapture: workspace.referenceCapture,
+        strokeColor: workspace.strokeColor,
+        calculator: workspace.calculator,
+        anchors: workspace.anchors
+      };
+      setProject({ metadata, pdfBlob, workspace });
+      setZoom(clamp(workspace.zoom, MIN_ZOOM, MAX_ZOOM));
+      setStrokeColor(workspace.strokeColor);
+      setHighlights(workspace.annotations);
+      setCounters(workspace.counters.map((counter) => ({ ...counter })));
+      setConnections(workspace.connections);
+      setReferenceCapture(workspace.referenceCapture);
+      setCalculator(workspace.calculator);
+      setAnchors(workspace.anchors);
+      setProjectStatus("ready");
+      setSaveStatus("saved");
+      hydratedWorkspaceRef.current = true;
+    },
+    []
+  );
+
   useEffect(() => {
     if (projectData === undefined) {
-      setProjectStatus("loading");
+      if (!hydratedWorkspaceRef.current) {
+        setProjectStatus("loading");
+      }
       return;
     }
 
     if (projectData === null) {
-      if (!isAuthLoading) {
+      if (!isAuthLoading && !hydratedWorkspaceRef.current) {
         setProject(null);
         setProjectStatus("missing");
       }
@@ -413,40 +549,50 @@ export default function ProjectEditorPage({
       setPages([]);
 
       try {
-        const response = await fetch(loaded.pdfUrl);
-        if (!response.ok) {
-          throw new Error("The PDF could not be downloaded.");
+        const metadata = { ...loaded.metadata, id: String(loaded.metadata.id) };
+        const cached = await readCachedProject(metadata.id).catch(() => null);
+
+        // The PDF is immutable per fingerprint, so a cached copy is preferred
+        // over re-downloading it on every open.
+        let pdfBlob = cached && cached.fingerprint === metadata.fingerprint ? cached.pdfBlob : null;
+        if (!pdfBlob) {
+          const response = await fetch(loaded.pdfUrl);
+          if (!response.ok) {
+            throw new Error("The PDF could not be downloaded.");
+          }
+          pdfBlob = await response.blob();
         }
-        const pdfBlob = await response.blob();
         if (cancelled) {
           return;
         }
 
-        const workspace = normalizeWorkspace(loaded.workspace);
-        const metadata = { ...loaded.metadata, id: String(loaded.metadata.id) };
+        // Offline edits that never reached the cloud win over the server copy.
+        const hasDirtyLocalEdits = Boolean(cached?.workspaceDirty && cached.workspace);
+        const workspace =
+          hasDirtyLocalEdits && cached?.workspace ? cached.workspace : normalizeWorkspace(loaded.workspace);
 
-        latestWorkspaceRef.current = {
-          zoom: clamp(workspace.zoom, MIN_ZOOM, MAX_ZOOM),
-          annotations: workspace.annotations,
-          counters: workspace.counters,
-          connections: workspace.connections,
-          referenceCapture: workspace.referenceCapture,
-          strokeColor: workspace.strokeColor,
-          calculator: workspace.calculator,
-          anchors: workspace.anchors
-        };
-        setProject({ metadata, pdfBlob, workspace });
-        setZoom(clamp(workspace.zoom, MIN_ZOOM, MAX_ZOOM));
-        setStrokeColor(workspace.strokeColor);
-        setHighlights(workspace.annotations);
-        setCounters(workspace.counters.map((counter) => ({ ...counter })));
-        setConnections(workspace.connections);
-        setReferenceCapture(workspace.referenceCapture);
-        setCalculator(workspace.calculator);
-        setAnchors(workspace.anchors);
-        setProjectStatus("ready");
-        setSaveStatus("saved");
-        hydratedWorkspaceRef.current = true;
+        applyLoadedProject(metadata, pdfBlob, workspace);
+
+        void writeCachedProject(metadata.id, {
+          metadata,
+          pdfBlob,
+          fingerprint: metadata.fingerprint
+        }).catch(() => undefined);
+
+        if (hasDirtyLocalEdits) {
+          // Push the offline edits to the account; only mark the cache clean
+          // if no newer local edit landed in the meantime.
+          void writeCachedWorkspace(metadata.id, workspace, { dirty: true })
+            .then((revision) =>
+              saveWorkspaceMutation({ projectId: metadata.id, workspace })
+                .then(() => markCachedWorkspaceClean(metadata.id, revision))
+                .catch(() => setSaveStatus("error"))
+            )
+            .catch(() => undefined);
+        } else {
+          void writeCachedWorkspace(metadata.id, workspace, { dirty: false }).catch(() => undefined);
+        }
+
         void touchProjectMutation({ projectId: metadata.id });
       } catch {
         if (!cancelled) {
@@ -461,7 +607,62 @@ export default function ProjectEditorPage({
     return () => {
       cancelled = true;
     };
-  }, [projectData, isAuthLoading, touchProjectMutation]);
+  }, [projectData, isAuthLoading, touchProjectMutation, applyLoadedProject, saveWorkspaceMutation]);
+
+  useEffect(() => {
+    // Offline fallback: when the account query can't resolve (no connection),
+    // open the most recent locally cached copy of this project instead.
+    if (projectData !== undefined || hydratedWorkspaceRef.current) {
+      return;
+    }
+
+    let cancelled = false;
+    const offlineNow = typeof navigator !== "undefined" && !navigator.onLine;
+    const delay = offlineNow ? 300 : 3500;
+
+    const timeoutId = window.setTimeout(() => {
+      void readCachedProject(params.projectId)
+        .then((cached) => {
+          if (cancelled || hydratedWorkspaceRef.current || !cached) {
+            return;
+          }
+          applyLoadedProject(cached.metadata, cached.pdfBlob, cached.workspace ?? normalizeWorkspace(null));
+          hydratedFromCacheRef.current = true;
+          setIsOffline(true);
+        })
+        .catch(() => undefined);
+    }, delay);
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timeoutId);
+    };
+  }, [projectData, params.projectId, applyLoadedProject]);
+
+  useEffect(() => {
+    // After an offline open, the first time the account query resolves the
+    // local (possibly dirty) workspace is pushed so the cloud catches up.
+    if (!hydratedFromCacheRef.current || projectData === undefined || projectData === null) {
+      return;
+    }
+    hydratedFromCacheRef.current = false;
+    // The account is reachable after all — the cache open was a head start,
+    // not a real offline session.
+    setIsOffline(typeof navigator !== "undefined" && !navigator.onLine);
+
+    const projectId = String(projectData.metadata.id);
+    const workspace = normalizeWorkspace(latestWorkspaceRef.current);
+    void writeCachedWorkspace(projectId, workspace, { dirty: true })
+      .then((revision) =>
+        saveWorkspaceMutation({ projectId, workspace }).then(() => {
+          void markCachedWorkspaceClean(projectId, revision).catch(() => undefined);
+          setSaveStatus("saved");
+        })
+      )
+      .catch(() => {
+        setSaveStatus("error");
+      });
+  }, [projectData, saveWorkspaceMutation]);
 
   useEffect(() => {
     if (!project) {
@@ -482,8 +683,31 @@ export default function ProjectEditorPage({
         setPdfDoc(loadedPdf);
         setPages(metrics);
 
+        // Fit-to-width when the stored zoom would clip the page off-screen or
+        // leave it uselessly small — the first seconds of a session should
+        // never require corrective pinching.
+        const viewer = viewerRef.current;
+        if (viewer && metrics.length > 0) {
+          const storedZoom = latestWorkspaceRef.current.zoom;
+          const pageWidthAtStored = metrics[0].width * storedZoom;
+          if (pageWidthAtStored > viewer.clientWidth || pageWidthAtStored < viewer.clientWidth * 0.55) {
+            setZoom(clamp((viewer.clientWidth - 28) / metrics[0].width, MIN_ZOOM, MAX_ZOOM));
+          }
+        }
+
         if (currentProject.metadata.pageCount !== metrics.length) {
           void updatePageCountMutation({ projectId: currentProject.metadata.id, pageCount: metrics.length });
+        }
+
+        if (!currentProject.metadata.thumbnailDataUrl) {
+          void renderPdfThumbnail(loadedPdf).then((thumbnailDataUrl) => {
+            if (thumbnailDataUrl && !cancelled) {
+              void setThumbnailMutation({
+                projectId: currentProject.metadata.id,
+                thumbnailDataUrl
+              }).catch(() => undefined);
+            }
+          });
         }
       } catch {
         if (!cancelled) {
@@ -497,7 +721,49 @@ export default function ProjectEditorPage({
     return () => {
       cancelled = true;
     };
-  }, [project, updatePageCountMutation]);
+  }, [project, updatePageCountMutation, setThumbnailMutation]);
+
+  useEffect(() => {
+    const viewer = viewerRef.current;
+    if (!viewer || pages.length < 2) {
+      return;
+    }
+
+    const onScroll = () => {
+      const viewerRect = viewer.getBoundingClientRect();
+      const centerY = viewerRect.top + viewer.clientHeight / 2;
+      let pageNumber = 1;
+      for (let index = 0; index < pages.length; index += 1) {
+        const pageElement = pageRefs.current[index];
+        if (!pageElement) {
+          continue;
+        }
+        if (pageElement.getBoundingClientRect().top <= centerY) {
+          pageNumber = index + 1;
+        } else {
+          break;
+        }
+      }
+      setCurrentPageNumber(pageNumber);
+      setIsPagePillVisible(true);
+      if (pagePillTimeoutRef.current !== null) {
+        window.clearTimeout(pagePillTimeoutRef.current);
+      }
+      pagePillTimeoutRef.current = window.setTimeout(() => {
+        setIsPagePillVisible(false);
+        pagePillTimeoutRef.current = null;
+      }, 1600);
+    };
+
+    viewer.addEventListener("scroll", onScroll, { passive: true });
+    return () => {
+      viewer.removeEventListener("scroll", onScroll);
+      if (pagePillTimeoutRef.current !== null) {
+        window.clearTimeout(pagePillTimeoutRef.current);
+        pagePillTimeoutRef.current = null;
+      }
+    };
+  }, [pages.length, projectStatus]);
 
   useEffect(() => {
     if (!project || !hydratedWorkspaceRef.current) {
@@ -507,10 +773,19 @@ export default function ProjectEditorPage({
     const projectId = project.metadata.id;
     setSaveStatus("saving");
     const timeoutId = window.setTimeout(() => {
-      void saveWorkspaceMutation({ projectId, workspace: normalizeWorkspace(latestWorkspaceRef.current) })
-        .then(() => {
-          setSaveStatus("saved");
-        })
+      const workspace = normalizeWorkspace(latestWorkspaceRef.current);
+      // Write-through: the local cache is updated first so edits survive a
+      // closed tab even when the cloud save can't complete (offline).
+      void writeCachedWorkspace(projectId, workspace, { dirty: true })
+        .catch(() => undefined)
+        .then((revision) =>
+          saveWorkspaceMutation({ projectId, workspace }).then(() => {
+            if (typeof revision === "number") {
+              void markCachedWorkspaceClean(projectId, revision).catch(() => undefined);
+            }
+            setSaveStatus("saved");
+          })
+        )
         .catch(() => {
           setSaveStatus("error");
         });
@@ -531,9 +806,16 @@ export default function ProjectEditorPage({
       if (!hydratedWorkspaceRef.current) {
         return;
       }
-      void saveWorkspaceMutation({ projectId, workspace: normalizeWorkspace(latestWorkspaceRef.current) }).catch(() => {
-        setSaveStatus("error");
-      });
+      const workspace = normalizeWorkspace(latestWorkspaceRef.current);
+      void writeCachedWorkspace(projectId, workspace, { dirty: true })
+        .then((revision) =>
+          saveWorkspaceMutation({ projectId, workspace }).then(() =>
+            markCachedWorkspaceClean(projectId, revision).catch(() => undefined)
+          )
+        )
+        .catch(() => {
+          setSaveStatus("error");
+        });
     };
 
     const onVisibilityChange = () => {
@@ -581,12 +863,13 @@ export default function ProjectEditorPage({
     }
 
     const doc = pdfDoc;
+    const renderTasks = renderTasksRef.current;
     let cancelled = false;
 
     async function renderPages() {
       for (let pageIndex = 0; pageIndex < pages.length; pageIndex += 1) {
         const canvas = canvasRefs.current[pageIndex];
-        if (!canvas) {
+        if (!canvas || cancelled) {
           continue;
         }
 
@@ -598,12 +881,34 @@ export default function ProjectEditorPage({
           continue;
         }
 
-        canvas.width = Math.floor(viewport.width);
-        canvas.height = Math.floor(viewport.height);
+        // Render at device resolution, but cap the backing store so extreme
+        // zoom levels stay within mobile canvas memory limits.
+        const devicePixelRatio = Math.min(window.devicePixelRatio || 1, 3);
+        const budgetScale = Math.sqrt(MAX_CANVAS_PIXELS / (viewport.width * viewport.height));
+        const outputScale = Math.max(0.25, Math.min(devicePixelRatio, budgetScale));
+
+        renderTasks.get(pageIndex)?.cancel();
+
+        canvas.width = Math.floor(viewport.width * outputScale);
+        canvas.height = Math.floor(viewport.height * outputScale);
         canvas.style.width = `${viewport.width}px`;
         canvas.style.height = `${viewport.height}px`;
 
-        await page.render({ canvasContext: context, viewport }).promise;
+        const task = page.render({
+          canvasContext: context,
+          viewport,
+          transform: outputScale !== 1 ? [outputScale, 0, 0, outputScale, 0, 0] : undefined
+        });
+        renderTasks.set(pageIndex, task);
+        try {
+          await task.promise;
+        } catch {
+          // RenderingCancelledException: a newer render owns this canvas now.
+        } finally {
+          if (renderTasks.get(pageIndex) === task) {
+            renderTasks.delete(pageIndex);
+          }
+        }
       }
     }
 
@@ -611,6 +916,10 @@ export default function ProjectEditorPage({
 
     return () => {
       cancelled = true;
+      for (const task of renderTasks.values()) {
+        task.cancel();
+      }
+      renderTasks.clear();
     };
   }, [pdfDoc, pages, zoom]);
 
@@ -893,7 +1202,7 @@ export default function ProjectEditorPage({
         draftHighlight.width > 10 &&
         draftHighlight.height > 10
       ) {
-        setHighlights((prev) => [...prev, { ...draftHighlight, id: `hl-${Date.now()}`, kind: draftHighlight.kind }]);
+        setHighlights((prev) => [...prev, { ...draftHighlight, id: createId("hl"), kind: draftHighlight.kind }]);
       }
 
       if (drawing?.tool === "line" && draftHighlight?.kind === "line") {
@@ -902,12 +1211,12 @@ export default function ProjectEditorPage({
           (draftHighlight.y2 ?? draftHighlight.y) - draftHighlight.y
         );
         if (lineLength > 8) {
-          setHighlights((prev) => [...prev, { ...draftHighlight, id: `hl-${Date.now()}`, kind: "line" }]);
+          setHighlights((prev) => [...prev, { ...draftHighlight, id: createId("hl"), kind: "line" }]);
         }
       }
 
       if (drawing?.tool === "freeDraw" && draftFreeDraw?.points && draftFreeDraw.points.length > 1) {
-        setHighlights((prev) => [...prev, { ...draftFreeDraw, id: `hl-${Date.now()}`, kind: "freeDraw" }]);
+        setHighlights((prev) => [...prev, { ...draftFreeDraw, id: createId("hl"), kind: "freeDraw" }]);
       }
 
       drawingRef.current = null;
@@ -929,7 +1238,7 @@ export default function ProjectEditorPage({
             return [
               ...prev,
               {
-                id: `conn-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`,
+                id: createId("conn"),
                 fromCounterId: connecting.fromCounterId,
                 toCounterId
               }
@@ -1023,12 +1332,35 @@ export default function ProjectEditorPage({
   }, [counters]);
 
   useEffect(() => {
+    // One-time nudge toward the app's least discoverable feature.
+    if (counters.length !== 2 || connections.length > 0 || !hydratedWorkspaceRef.current) {
+      return;
+    }
+    if (window.localStorage.getItem(LINK_HINT_KEY)) {
+      return;
+    }
+    window.localStorage.setItem(LINK_HINT_KEY, "shown");
+    showToast("Tip: link counters so one advances the other — tap ⛓ in the Counters panel.", {
+      duration: 8000
+    });
+  }, [counters.length, connections.length, showToast]);
+
+  useEffect(() => {
+    function isEditableTarget(target: EventTarget | null): boolean {
+      const element = target as HTMLElement | null;
+      if (!element) {
+        return false;
+      }
+      return element.tagName === "INPUT" || element.tagName === "TEXTAREA" || element.isContentEditable;
+    }
+
     function onUndoHighlightHotkey(event: KeyboardEvent) {
+      // While typing, leave keys to the field (native text undo, per-field Escape handling).
+      if (isEditableTarget(event.target)) {
+        return;
+      }
+
       if (event.key === "Escape") {
-        const target = event.target as HTMLElement | null;
-        if (target?.classList.contains("text-annotation-input")) {
-          return;
-        }
         setSelectedTextAnnotationId(null);
         setEditingTextAnnotationId(null);
         return;
@@ -1101,7 +1433,7 @@ export default function ProjectEditorPage({
         if (hadTextSelected) {
           return;
         }
-        const id = `hl-${Date.now()}`;
+        const id = createId("hl");
         setHighlights((prev) => [
           ...prev,
           {
@@ -1219,7 +1551,7 @@ export default function ProjectEditorPage({
     if (!located) {
       return;
     }
-    const id = `anchor-${Date.now()}`;
+    const id = createId("anchor");
     setAnchors((prev) => [
       ...prev,
       { id, name: `Mark ${prev.length + 1}`, pageIndex: located.pageIndex, yRatio: located.yRatio }
@@ -1232,10 +1564,79 @@ export default function ProjectEditorPage({
   }
 
   function deleteAnchor(anchorId: string) {
+    const index = anchors.findIndex((anchor) => anchor.id === anchorId);
+    if (index === -1) {
+      return;
+    }
+    const removed = anchors[index];
     setAnchors((prev) => prev.filter((anchor) => anchor.id !== anchorId));
     if (editingAnchorId === anchorId) {
       setEditingAnchorId(null);
     }
+    showToast(`Deleted bookmark "${removed.name || "Untitled mark"}"`, {
+      actionLabel: "Undo",
+      onAction: () => {
+        setAnchors((prev) => {
+          const next = [...prev];
+          next.splice(Math.min(index, next.length), 0, removed);
+          return next;
+        });
+      }
+    });
+  }
+
+  function deleteCounter(counter: KnitCounter) {
+    const removedConnections = connections.filter(
+      (item) => item.fromCounterId === counter.id || item.toCounterId === counter.id
+    );
+    const undoStack = counterUndoHistoryRef.current[counter.id];
+
+    setCounters((prev) => prev.filter((item) => item.id !== counter.id));
+    setConnections((prev) =>
+      prev.filter((item) => item.fromCounterId !== counter.id && item.toCounterId !== counter.id)
+    );
+    delete counterUndoHistoryRef.current[counter.id];
+    if (linkSourceId === counter.id) {
+      setLinkSourceId(null);
+    }
+
+    showToast(`Deleted "${counter.label}" (${counter.value})`, {
+      actionLabel: "Undo",
+      onAction: () => {
+        if (undoStack) {
+          counterUndoHistoryRef.current[counter.id] = undoStack;
+        }
+        setCounters((prev) => [...prev, counter]);
+        if (removedConnections.length > 0) {
+          setConnections((prev) => [...prev, ...removedConnections]);
+        }
+      }
+    });
+  }
+
+  function startLinkMode(counter: KnitCounter) {
+    closeAllPanels();
+    setLinkSourceId(counter.id);
+    showToast(`Tap another counter to link "${counter.label}" to it`, {
+      actionLabel: "Cancel",
+      onAction: () => setLinkSourceId(null),
+      duration: 12000
+    });
+  }
+
+  function completeLink(toCounterId: string) {
+    const fromCounterId = linkSourceId;
+    setLinkSourceId(null);
+    dismissToast();
+    if (!fromCounterId || fromCounterId === toCounterId) {
+      return;
+    }
+    setConnections((prev) => {
+      if (prev.some((item) => item.fromCounterId === fromCounterId && item.toCounterId === toCounterId)) {
+        return prev;
+      }
+      return [...prev, { id: createId("conn"), fromCounterId, toCounterId }];
+    });
   }
 
   function addCounter(type: CounterType) {
@@ -1274,7 +1675,7 @@ export default function ProjectEditorPage({
     setCounters((prev) => [
       ...prev,
       {
-        id: `counter-${Date.now()}`,
+        id: createId("counter"),
         pageIndex: targetPage,
         x: safe.x,
         y: safe.y,
@@ -1863,6 +2264,7 @@ export default function ProjectEditorPage({
 
   const viewerTopPadding = toolbarHeight + 14;
   const annotateScrollbarTop = toolbarHeight + 16;
+  const activeAnnotateTool = ANNOTATE_TOOLS.find((tool) => tool.id === drawTool) ?? ANNOTATE_TOOLS[0];
 
   if (projectStatus === "loading") {
     return (
@@ -1923,6 +2325,10 @@ export default function ProjectEditorPage({
         toolbarRef={toolbarRef}
         projectName={project.metadata.name}
         sourceFileName={project.metadata.sourceFileName}
+        saveStatus={isOffline ? "offline" : saveStatus}
+        activeToolGlyph={activeAnnotateTool.glyph}
+        activeToolLabel={activeAnnotateTool.label}
+        activeToolColor={strokeColor}
         onBack={() => router.push("/")}
         theme={theme}
         onToggleTheme={() => setTheme((prev) => (prev === "dark" ? "light" : "dark"))}
@@ -1966,10 +2372,10 @@ export default function ProjectEditorPage({
           onClose={() => setIsCalculatorPopoverOpen(false)}
           anchorRef={calculatorButtonRef}
           width={360}
+          title="Calculator"
           className="calculator-panel"
         >
             <div className="calculator-head">
-              <h2 className="calculator-title">Calculator</h2>
               <div className="calculator-head-actions">
                 <span className="calculator-direction-readout">
                   {calculatorResults.fromLabel} to {calculatorResults.toLabel}
@@ -2007,6 +2413,7 @@ export default function ProjectEditorPage({
                   <input
                     type="text"
                     inputMode="decimal"
+                    aria-label="Pattern gauge: rows per inch"
                     value={calculator.patternRowsPerInch}
                     onChange={(event) => updateCalculatorField("patternRowsPerInch", event.target.value)}
                   />
@@ -2015,6 +2422,7 @@ export default function ProjectEditorPage({
                   <input
                     type="text"
                     inputMode="decimal"
+                    aria-label="Your gauge: rows per inch"
                     value={calculator.observedRowsPerInch}
                     onChange={(event) => updateCalculatorField("observedRowsPerInch", event.target.value)}
                   />
@@ -2025,6 +2433,7 @@ export default function ProjectEditorPage({
                   <input
                     type="text"
                     inputMode="decimal"
+                    aria-label="Pattern gauge: stitches per inch"
                     value={calculator.patternStitchesPerInch}
                     onChange={(event) => updateCalculatorField("patternStitchesPerInch", event.target.value)}
                   />
@@ -2033,6 +2442,7 @@ export default function ProjectEditorPage({
                   <input
                     type="text"
                     inputMode="decimal"
+                    aria-label="Your gauge: stitches per inch"
                     value={calculator.observedStitchesPerInch}
                     onChange={(event) => updateCalculatorField("observedStitchesPerInch", event.target.value)}
                   />
@@ -2049,6 +2459,7 @@ export default function ProjectEditorPage({
                     <input
                       type="text"
                       inputMode="decimal"
+                      aria-label="Row count to convert"
                       value={calculator.rowInput}
                       onChange={(event) => updateCalculatorField("rowInput", event.target.value)}
                     />
@@ -2072,6 +2483,7 @@ export default function ProjectEditorPage({
                     <input
                       type="text"
                       inputMode="decimal"
+                      aria-label="Stitch count to convert"
                       value={calculator.stitchInput}
                       onChange={(event) => updateCalculatorField("stitchInput", event.target.value)}
                     />
@@ -2120,11 +2532,11 @@ export default function ProjectEditorPage({
           onClose={() => setIsZoomPopoverOpen(false)}
           anchorRef={zoomButtonRef}
           width={300}
-          title="Zoom"
+          title="View"
           className="zoom-panel"
         >
           <div className="zoom-popover-head">
-            <span>Fit to screen</span>
+            <span>Zoom</span>
             <strong>{Math.round(zoom * 100)}%</strong>
           </div>
           <input
@@ -2141,13 +2553,39 @@ export default function ProjectEditorPage({
             <span>{Math.round(MIN_ZOOM * 100)}%</span>
             <span>{Math.round(MAX_ZOOM * 100)}%</span>
           </div>
+          <button type="button" className="view-fit-btn" onClick={applyFitWidth}>
+            Fit page to width
+          </button>
+          <div className="view-look-section">
+            <span className="tool-section-label" id="page-look-label">
+              Page appearance
+            </span>
+            <div className="view-look-row" role="group" aria-labelledby="page-look-label">
+              {[
+                { look: "normal" as PageLook, label: "Normal" },
+                { look: "dimmed" as PageLook, label: "Dimmed" },
+                { look: "inverted" as PageLook, label: "Inverted" }
+              ].map(({ look, label }) => (
+                <button
+                  key={look}
+                  type="button"
+                  className={pageLook === look ? "view-look-btn active" : "view-look-btn"}
+                  aria-pressed={pageLook === look}
+                  onClick={() => updatePageLook(look)}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+            <p className="view-look-note">Dimmed and inverted are easier on the eyes for evening knitting.</p>
+          </div>
         </Panel>
         <Panel
           open={isIndexPopoverOpen}
           onClose={() => setIsIndexPopoverOpen(false)}
           anchorRef={indexButtonRef}
           width={320}
-          title="Index"
+          title="Bookmarks"
           className="index-panel"
         >
             <div className="index-head">
@@ -2157,7 +2595,7 @@ export default function ProjectEditorPage({
             </div>
             {anchors.length === 0 ? (
               <p className="index-empty">
-                Scroll to a spot in your pattern, then tap “Mark here” to save a named jump point.
+                Scroll to a spot in your pattern, then tap “+ Mark current spot” to save a named jump point.
               </p>
             ) : (
               <ul className="index-list">
@@ -2225,8 +2663,16 @@ export default function ProjectEditorPage({
                 key={tool.id}
                 type="button"
                 className={drawTool === tool.id ? "tool-btn active" : "tool-btn"}
-                onClick={() => setDrawTool(tool.id)}
+                onClick={() => {
+                  setDrawTool(tool.id);
+                  // On phones the sheet covers the page; picking a tool is a
+                  // clear "I'm ready to draw" so it dismisses itself.
+                  if (window.matchMedia("(max-width: 640px)").matches) {
+                    setIsToolsOpen(false);
+                  }
+                }}
                 aria-pressed={drawTool === tool.id}
+                aria-label={tool.label}
               >
                 <span className="tool-btn-glyph" aria-hidden="true">
                   {tool.glyph}
@@ -2282,6 +2728,16 @@ export default function ProjectEditorPage({
                   <div className="counter-quick-controls">
                     <button
                       type="button"
+                      className="counter-link-btn"
+                      onClick={() => startLinkMode(counter)}
+                      aria-label={`Link ${counter.label} to another counter`}
+                      title="Link to another counter"
+                      disabled={counters.length < 2}
+                    >
+                      ⛓
+                    </button>
+                    <button
+                      type="button"
                       className="counter-step"
                       onClick={() => nudgeCounter(counter.id, -1)}
                       aria-label={`Decrease ${counter.label}`}
@@ -2328,9 +2784,9 @@ export default function ProjectEditorPage({
           <div className="menu-list">
             <button type="button" className="menu-item" onClick={toggleIndexPopover}>
               <span className="menu-item-glyph" aria-hidden="true">
-                📋
+                🔖
               </span>
-              Index
+              Bookmarks
             </button>
             <button type="button" className="menu-item" onClick={toggleCalculatorPopover}>
               <span className="menu-item-glyph" aria-hidden="true">
@@ -2399,6 +2855,7 @@ export default function ProjectEditorPage({
             : `pdf-viewer annotate-mode${mode === "highlight" ? " highlight-tools-open" : ""}`
         }
         ref={viewerRef}
+        data-page-look={pageLook}
         style={{ paddingTop: viewerTopPadding }}
         onPointerDown={handleViewerPointerDown}
         onPointerMove={handleViewerPointerMove}
@@ -2659,8 +3116,17 @@ export default function ProjectEditorPage({
                 .map((counter) => (
                   <div
                     key={counter.id}
-                    className={`knit-counter ${counter.type}${focusCounterId === counter.id ? " focused" : ""}`}
+                    className={`knit-counter ${counter.type}${focusCounterId === counter.id ? " focused" : ""}${
+                      linkSourceId === counter.id ? " link-source" : ""
+                    }${linkSourceId && linkSourceId !== counter.id ? " link-target" : ""}`}
                     style={{ left: counter.x * zoom, top: counter.y * zoom }}
+                    onClickCapture={(event) => {
+                      if (linkSourceId && linkSourceId !== counter.id) {
+                        event.stopPropagation();
+                        event.preventDefault();
+                        completeLink(counter.id);
+                      }
+                    }}
                   >
                     <div className="counter-top">
                       <button
@@ -2699,16 +3165,10 @@ export default function ProjectEditorPage({
                       <button
                         type="button"
                         className="counter-close"
-                        onClick={() => {
-                          setCounters((prev) => prev.filter((item) => item.id !== counter.id));
-                          setConnections((prev) =>
-                            prev.filter((item) => item.fromCounterId !== counter.id && item.toCounterId !== counter.id)
-                          );
-                          delete counterUndoHistoryRef.current[counter.id];
-                        }}
+                        onClick={() => deleteCounter(counter)}
                         aria-label={`Remove ${counter.label} counter`}
                       >
-                        x
+                        ✕
                       </button>
                     </div>
                     <input
@@ -2762,31 +3222,37 @@ export default function ProjectEditorPage({
                       data-node-role="input"
                       data-counter-id={counter.id}
                       data-hot={connectTargetCounterId === counter.id ? "true" : "false"}
+                      data-connected={(connectionStats.incoming.get(counter.id) ?? 0) > 0 ? "true" : "false"}
                       className="counter-node input"
                       ref={(node) => {
                         nodeRefs.current[`${counter.id}:input`] = node;
                       }}
-                      aria-label={`${counter.label} input node`}
+                      aria-label={`${counter.label} incoming link port`}
+                      title="Incoming links land here"
                     >
-                      <span className="node-dot" />
-                      <span className="node-label">IN</span>
-                      <span className="node-count">{connectionStats.incoming.get(counter.id) ?? 0}</span>
+                      <span className="node-dot" aria-hidden="true" />
+                      {(connectionStats.incoming.get(counter.id) ?? 0) > 0 ? (
+                        <span className="node-count">{connectionStats.incoming.get(counter.id)}</span>
+                      ) : null}
                     </button>
                     <button
                       type="button"
                       data-node-role="output"
                       data-counter-id={counter.id}
                       data-hot={connectingFromCounterId === counter.id ? "true" : "false"}
+                      data-connected={(connectionStats.outgoing.get(counter.id) ?? 0) > 0 ? "true" : "false"}
                       className="counter-node output"
                       ref={(node) => {
                         nodeRefs.current[`${counter.id}:output`] = node;
                       }}
                       onPointerDown={(event) => startConnectionDrag(event, counter)}
-                      aria-label={`${counter.label} output node`}
+                      aria-label={`${counter.label} outgoing link port — drag to another counter to link`}
+                      title="Drag to another counter to link"
                     >
-                      <span className="node-dot" />
-                      <span className="node-label">OUT</span>
-                      <span className="node-count">{connectionStats.outgoing.get(counter.id) ?? 0}</span>
+                      <span className="node-dot" aria-hidden="true" />
+                      {(connectionStats.outgoing.get(counter.id) ?? 0) > 0 ? (
+                        <span className="node-count">{connectionStats.outgoing.get(counter.id)}</span>
+                      ) : null}
                     </button>
                   </div>
                 ))}
@@ -2795,6 +3261,103 @@ export default function ProjectEditorPage({
           ))}
         </div>
       </section>
+
+      {mode === "highlight" ? (
+        <div className="tool-strip" role="toolbar" aria-label="Mark-up tools">
+          {ANNOTATE_TOOLS.map((tool) => (
+            <button
+              key={tool.id}
+              type="button"
+              className={drawTool === tool.id ? "tool-strip-btn active" : "tool-strip-btn"}
+              onClick={() => setDrawTool(tool.id)}
+              aria-pressed={drawTool === tool.id}
+              aria-label={tool.label}
+              title={tool.label}
+            >
+              <span aria-hidden="true">{tool.glyph}</span>
+            </button>
+          ))}
+          <span className="tool-strip-divider" aria-hidden="true" />
+          <button
+            type="button"
+            className="tool-strip-color"
+            onClick={() => {
+              closeAllPanels();
+              setIsToolsOpen(true);
+            }}
+            aria-label="Change color"
+            title="Change color"
+          >
+            <span className="tool-strip-color-dot" style={{ background: strokeColor }} aria-hidden="true" />
+          </button>
+          <button
+            type="button"
+            className="tool-strip-btn"
+            onClick={undoLatestAnnotation}
+            disabled={!highlights.length}
+            aria-label="Undo last mark"
+            title="Undo last mark"
+          >
+            <span aria-hidden="true">↩</span>
+          </button>
+        </div>
+      ) : null}
+
+      {pages.length > 1 ? (
+        <button
+          ref={pagePillRef}
+          type="button"
+          className={`page-pill${isPagePillVisible || isPageJumpOpen ? " visible" : ""}`}
+          style={{ top: toolbarHeight + 12 }}
+          onClick={() => setIsPageJumpOpen((open) => !open)}
+          aria-label={`Page ${currentPageNumber} of ${pages.length} — jump to a page`}
+        >
+          {currentPageNumber} / {pages.length}
+        </button>
+      ) : null}
+
+      <Panel
+        open={isPageJumpOpen}
+        onClose={() => setIsPageJumpOpen(false)}
+        anchorRef={pagePillRef}
+        width={260}
+        title="Go to page"
+      >
+        <div className="page-jump-grid">
+          {pages.map((_, index) => (
+            <button
+              key={index}
+              type="button"
+              className={currentPageNumber === index + 1 ? "page-jump-btn active" : "page-jump-btn"}
+              onClick={() => {
+                scrollToPage(index);
+                setIsPageJumpOpen(false);
+              }}
+            >
+              {index + 1}
+            </button>
+          ))}
+        </div>
+      </Panel>
+
+      {toast ? (
+        <div className="editor-toast" role="status">
+          <span className="editor-toast-message">{toast.message}</span>
+          {toast.actionLabel ? (
+            <button
+              type="button"
+              className="editor-toast-action"
+              onClick={() => {
+                const action = toast.onAction;
+                dismissToast();
+                action?.();
+              }}
+            >
+              {toast.actionLabel}
+            </button>
+          ) : null}
+        </div>
+      ) : null}
     </main>
   );
 }

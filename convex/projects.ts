@@ -13,9 +13,13 @@ function toMetadata(project: Doc<"projects">) {
     createdAt: project.createdAt,
     updatedAt: project.updatedAt,
     lastOpenedAt: project.lastOpenedAt,
-    pageCount: project.pageCount
+    pageCount: project.pageCount,
+    thumbnailDataUrl: project.thumbnailDataUrl
   };
 }
+
+// Generous ceiling for a ~360px JPEG data URL; rejects accidental huge payloads.
+const MAX_THUMBNAIL_LENGTH = 200_000;
 
 async function requireUserId(ctx: QueryCtx | MutationCtx): Promise<Id<"users">> {
   const userId = await getAuthUserId(ctx);
@@ -89,6 +93,25 @@ export const get = query({
       pdfUrl,
       pdfMimeType: project.pdfMimeType
     };
+  }
+});
+
+export const findByFingerprint = query({
+  args: { fingerprint: v.string() },
+  handler: async (ctx, args) => {
+    const userId = await getAuthUserId(ctx);
+    if (userId === null) {
+      return null;
+    }
+
+    const existing = await ctx.db
+      .query("projects")
+      .withIndex("by_user_and_fingerprint", (q) =>
+        q.eq("userId", userId).eq("fingerprint", args.fingerprint)
+      )
+      .first();
+
+    return existing ? { projectId: existing._id } : null;
   }
 });
 
@@ -182,6 +205,21 @@ export const rename = mutation({
       name: trimmed,
       updatedAt: new Date().toISOString()
     });
+  }
+});
+
+export const setThumbnail = mutation({
+  args: { projectId: v.string(), thumbnailDataUrl: v.string() },
+  handler: async (ctx, args) => {
+    if (args.thumbnailDataUrl.length > MAX_THUMBNAIL_LENGTH || !args.thumbnailDataUrl.startsWith("data:image/")) {
+      return;
+    }
+    const userId = await requireUserId(ctx);
+    const project = await loadOwnedProject(ctx, userId, args.projectId);
+    if (!project) {
+      return;
+    }
+    await ctx.db.patch(project._id, { thumbnailDataUrl: args.thumbnailDataUrl });
   }
 });
 

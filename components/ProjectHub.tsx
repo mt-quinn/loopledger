@@ -9,11 +9,13 @@ import type { Id } from "@/convex/_generated/dataModel";
 import {
   base64ToBlob,
   blobToBase64,
+  computeBlobFingerprint,
   saveWorkspaceToCloud,
   uploadPdfProject
 } from "../lib/convex-upload";
 import { migrateLocalProjects } from "../lib/migrate-local";
-import { computeBlobFingerprint, normalizeWorkspace } from "../lib/project-store";
+import { deleteCachedProject } from "../lib/local-db";
+import { normalizeWorkspace } from "../lib/workspace-utils";
 import type { ProjectBackup } from "../lib/project-types";
 import { useStoredTheme } from "../lib/use-stored-theme";
 import AuthForm from "./AuthForm";
@@ -74,6 +76,20 @@ function HubInner({
 
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const [bannerMessage, setBannerMessage] = useState<string | null>(null);
+  const bannerRetryRef = useRef<(() => void) | null>(null);
+  const [hasBannerRetry, setHasBannerRetry] = useState(false);
+
+  function showBanner(message: string, retry?: () => void) {
+    setBannerMessage(message);
+    bannerRetryRef.current = retry ?? null;
+    setHasBannerRetry(Boolean(retry));
+  }
+
+  function clearBanner() {
+    setBannerMessage(null);
+    bannerRetryRef.current = null;
+    setHasBannerRetry(false);
+  }
   const [editingProjectId, setEditingProjectId] = useState<string | null>(null);
   const [editingProjectName, setEditingProjectName] = useState("");
   const [accountMenuOpen, setAccountMenuOpen] = useState(false);
@@ -88,7 +104,7 @@ function HubInner({
     void migrateLocalProjects(convex)
       .then((count) => {
         if (count > 0) {
-          setBannerMessage(
+          showBanner(
             `Moved ${count} ${count === 1 ? "project" : "projects"} from this device into your account.`
           );
         }
@@ -98,15 +114,9 @@ function HubInner({
       });
   }, [convex]);
 
-  async function handlePdfImport(event: React.ChangeEvent<HTMLInputElement>) {
-    const file = event.target.files?.[0];
-    event.target.value = "";
-    if (!file) {
-      return;
-    }
-
+  async function importPdfFile(file: File) {
     setBusyAction("import-pdf");
-    setBannerMessage(null);
+    clearBanner();
     try {
       const fingerprint = await computeBlobFingerprint(file);
       const result = await uploadPdfProject(convex, file, {
@@ -118,20 +128,22 @@ function HubInner({
       });
       router.push(`/projects/${result.projectId}`);
     } catch {
-      setBannerMessage("The PDF could not be uploaded to your account.");
+      showBanner("The PDF could not be uploaded to your account.", () => void importPdfFile(file));
       setBusyAction(null);
     }
   }
 
-  async function handleBackupImport(event: React.ChangeEvent<HTMLInputElement>) {
+  function handlePdfImport(event: React.ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
     event.target.value = "";
-    if (!file) {
-      return;
+    if (file) {
+      void importPdfFile(file);
     }
+  }
 
+  async function importBackupFile(file: File) {
     setBusyAction("import-backup");
-    setBannerMessage(null);
+    clearBanner();
     try {
       const parsed = JSON.parse(await file.text()) as Partial<ProjectBackup>;
       if (parsed.version !== 1 || !parsed.metadata || !parsed.pdfBase64) {
@@ -154,18 +166,29 @@ function HubInner({
       router.push(`/projects/${result.projectId}`);
     } catch (error) {
       setBusyAction(null);
-      setBannerMessage(error instanceof Error ? error.message : "The backup file could not be restored.");
+      showBanner(
+        error instanceof Error ? error.message : "The backup file could not be restored.",
+        () => void importBackupFile(file)
+      );
+    }
+  }
+
+  function handleBackupImport(event: React.ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (file) {
+      void importBackupFile(file);
     }
   }
 
   async function handleExport(projectId: Id<"projects">) {
     setBusyAction(`export:${projectId}`);
-    setBannerMessage(null);
+    clearBanner();
 
     try {
       const data = await convex.query(api.projects.get, { projectId });
       if (!data) {
-        setBannerMessage("The project could not be exported.");
+        showBanner("The project could not be exported.", () => void handleExport(projectId));
         return;
       }
 
@@ -185,7 +208,7 @@ function HubInner({
         JSON.stringify(backup)
       );
     } catch {
-      setBannerMessage("The project could not be exported.");
+      showBanner("The project could not be exported.", () => void handleExport(projectId));
     } finally {
       setBusyAction(null);
     }
@@ -197,15 +220,17 @@ function HubInner({
     }
 
     setBusyAction(`delete:${projectId}`);
-    setBannerMessage(null);
+    clearBanner();
     try {
       await removeProjectMutation({ projectId });
+      // Drop any offline copy so a deleted project can't reappear from cache.
+      void deleteCachedProject(projectId).catch(() => undefined);
       if (editingProjectId === projectId) {
         setEditingProjectId(null);
         setEditingProjectName("");
       }
     } catch {
-      setBannerMessage("The project could not be deleted.");
+      showBanner("The project could not be deleted.", () => void handleDelete(projectId));
     } finally {
       setBusyAction(null);
     }
@@ -221,11 +246,11 @@ function HubInner({
     }
 
     setBusyAction(`rename:${projectId}`);
-    setBannerMessage(null);
+    clearBanner();
     try {
       await renameProjectMutation({ projectId, name: trimmed });
     } catch {
-      setBannerMessage("The project name could not be updated.");
+      showBanner("The project name could not be updated.");
     } finally {
       setBusyAction(null);
     }
@@ -287,7 +312,20 @@ function HubInner({
       {bannerMessage ? (
         <div className="hub-notice" role="status">
           <span>{bannerMessage}</span>
-          <button type="button" className="hub-notice-close" onClick={() => setBannerMessage(null)} aria-label="Dismiss">
+          {hasBannerRetry ? (
+            <button
+              type="button"
+              className="hub-notice-retry"
+              onClick={() => {
+                const retry = bannerRetryRef.current;
+                clearBanner();
+                retry?.();
+              }}
+            >
+              Retry
+            </button>
+          ) : null}
+          <button type="button" className="hub-notice-close" onClick={clearBanner} aria-label="Dismiss">
             ✕
           </button>
         </div>
@@ -345,51 +383,64 @@ function HubInner({
                 }
               }}
             >
-              <div className="project-card-head">
-                <span className="project-card-badge">
-                  {project.pageCount > 0 ? `${project.pageCount} ${project.pageCount === 1 ? "page" : "pages"}` : "PDF"}
-                </span>
-                <button
-                  type="button"
-                  className="project-card-menu-btn"
-                  aria-label={`Actions for ${project.name}`}
-                  aria-haspopup="dialog"
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    cardMenuAnchorRef.current = event.currentTarget;
-                    setMenuProjectId(project.id);
-                  }}
-                >
-                  <span aria-hidden="true">⋯</span>
-                </button>
-              </div>
-
-              <div className="project-card-body">
-                {editingProjectId === project.id ? (
-                  <input
-                    value={editingProjectName}
-                    className="project-card-name-input"
-                    autoFocus
-                    onClick={(event) => event.stopPropagation()}
-                    onChange={(event) => setEditingProjectName(event.target.value)}
-                    onBlur={() => void commitRename(project.id)}
-                    onKeyDown={(event) => {
-                      if (event.key === "Enter") {
-                        void commitRename(project.id);
-                      }
-                      if (event.key === "Escape") {
-                        setEditingProjectId(null);
-                        setEditingProjectName("");
-                      }
-                    }}
-                  />
+              <div className="project-card-thumb" aria-hidden="true">
+                {project.thumbnailDataUrl ? (
+                  // eslint-disable-next-line @next/next/no-img-element
+                  <img src={project.thumbnailDataUrl} alt="" loading="lazy" />
                 ) : (
-                  <h3 className="project-card-name">{project.name}</h3>
+                  <span className="project-card-thumb-placeholder">🧶</span>
                 )}
-                <p className="project-card-file">{project.sourceFileName}</p>
               </div>
 
-              <p className="project-card-meta">Last opened {formatProjectTime(project.lastOpenedAt)}</p>
+              <div className="project-card-main">
+                <div className="project-card-head">
+                  <span className="project-card-badge">
+                    {project.pageCount > 0
+                      ? `${project.pageCount} ${project.pageCount === 1 ? "page" : "pages"}`
+                      : "PDF"}
+                  </span>
+                  <button
+                    type="button"
+                    className="project-card-menu-btn"
+                    aria-label={`Actions for ${project.name}`}
+                    aria-haspopup="dialog"
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      cardMenuAnchorRef.current = event.currentTarget;
+                      setMenuProjectId(project.id);
+                    }}
+                  >
+                    <span aria-hidden="true">⋯</span>
+                  </button>
+                </div>
+
+                <div className="project-card-body">
+                  {editingProjectId === project.id ? (
+                    <input
+                      value={editingProjectName}
+                      className="project-card-name-input"
+                      autoFocus
+                      onClick={(event) => event.stopPropagation()}
+                      onChange={(event) => setEditingProjectName(event.target.value)}
+                      onBlur={() => void commitRename(project.id)}
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter") {
+                          void commitRename(project.id);
+                        }
+                        if (event.key === "Escape") {
+                          setEditingProjectId(null);
+                          setEditingProjectName("");
+                        }
+                      }}
+                    />
+                  ) : (
+                    <h3 className="project-card-name">{project.name}</h3>
+                  )}
+                  <p className="project-card-file">{project.sourceFileName}</p>
+                </div>
+
+                <p className="project-card-meta">Last opened {formatProjectTime(project.lastOpenedAt)}</p>
+              </div>
             </article>
           ))}
         </div>

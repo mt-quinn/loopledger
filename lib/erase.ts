@@ -100,7 +100,7 @@ export function eraseAlongSegment(
         .forEach((segment, index) => {
           next.push({
             ...annotation,
-            id: `${annotation.id}-e${index}-${Date.now()}`,
+            id: `${annotation.id}-e${index}-${crypto.randomUUID().slice(0, 8)}`,
             points: segment
           });
         });

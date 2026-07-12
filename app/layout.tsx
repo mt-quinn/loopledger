@@ -38,7 +38,16 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="en" className={`${fraunces.variable} ${hanken.variable}`}>
+    <html lang="en" className={`${fraunces.variable} ${hanken.variable}`} suppressHydrationWarning>
+      <head>
+        {/* Stamp the stored theme before first paint so dark-mode users never see a light flash. */}
+        <script
+          dangerouslySetInnerHTML={{
+            __html:
+              "try{var t=localStorage.getItem('whichstitch-theme-v1');if(t==='dark'||t==='light'){document.documentElement.dataset.theme=t;}}catch(e){}"
+          }}
+        />
+      </head>
       <body>
         <ConvexClientProvider>{children}</ConvexClientProvider>
       </body>

@@ -1,5 +1,6 @@
 import type { ConvexReactClient } from "convex/react";
-import { getProject, listProjects, normalizeWorkspace } from "./project-store";
+import { getLegacyProject, listLegacyProjects } from "./local-db";
+import { normalizeWorkspace } from "./workspace-utils";
 import { saveWorkspaceToCloud, uploadPdfProject } from "./convex-upload";
 
 const MIGRATION_FLAG = "whichstitch-cloud-migrated-v1";
@@ -22,10 +23,10 @@ export async function migrateLocalProjects(convex: ConvexReactClient): Promise<n
   }
 
   let migratedCount = 0;
-  const locals = await listProjects();
+  const locals = await listLegacyProjects();
 
   for (const meta of locals) {
-    const record = await getProject(meta.id);
+    const record = await getLegacyProject(meta.id);
     if (!record) {
       continue;
     }
